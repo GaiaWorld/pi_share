@@ -7,13 +7,19 @@ use std::{
     rc::Rc,
 };
 
-#[derive(Clone)]
 pub struct RcRefCell<T: ?Sized>(pub Rc<RefCell<T>>);
 
 impl<T: Sized> RcRefCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         RcRefCell(Rc::new(RefCell::new(value)))
+    }
+}
+
+impl<T: ?Sized> Clone for RcRefCell<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 

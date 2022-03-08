@@ -7,13 +7,19 @@ use std::{
     sync::Arc,
 };
 
-#[derive(Clone)]
 pub struct ArcTrustCell<T>(pub Arc<TrustCell<T>>);
 
 impl<T> ArcTrustCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
         ArcTrustCell(Arc::new(TrustCell::new(value)))
+    }
+}
+
+impl<T> Clone for ArcTrustCell<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -80,7 +86,7 @@ impl<T> DerefMut for ArcTrustCell<T> {
 }
 
 #[test]
-fn test_rc_refcell() {
+fn test_arc_trustcell() {
     struct A {
         pub a: u32,
     }
