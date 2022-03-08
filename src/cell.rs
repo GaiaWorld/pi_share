@@ -84,8 +84,8 @@ pub struct TrustCell<T: ?Sized> {
     flag: AtomicUsize,
     inner: UnsafeCell<T>,
 }
-unsafe impl<T> Sync for TrustCell<T> where T: Sync {}
-unsafe impl<T> Send for TrustCell<T> where T: Send {}
+unsafe impl<T: ?Sized> Sync for TrustCell<T> where T: Sync {}
+unsafe impl<T: ?Sized> Send for TrustCell<T> where T: Send {}
 
 impl<T> TrustCell<T> {
     /// Create a new cell, similar to `RefCell::new`

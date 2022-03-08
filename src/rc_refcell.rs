@@ -1,18 +1,67 @@
 use std::{
-    rc::Rc,
     cell::RefCell,
-    ops::{Deref, DerefMut}
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    ops::{Deref, DerefMut},
+    rc::Rc,
 };
 
-pub struct RcRefCell<T>(pub Rc<RefCell<T>>);
+#[derive(Clone)]
+pub struct RcRefCell<T: ?Sized>(pub Rc<RefCell<T>>);
 
-impl<T> RcRefCell<T> {
+impl<T: Sized> RcRefCell<T> {
+    #[inline]
     pub fn new(value: T) -> Self {
         RcRefCell(Rc::new(RefCell::new(value)))
     }
 }
 
-impl<T> Deref for RcRefCell<T> {
+impl<T: ?Sized + Hash> Hash for RcRefCell<T> {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.deref().hash(state);
+    }
+}
+
+impl<T: ?Sized + fmt::Display> fmt::Display for RcRefCell<T> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+impl<T: ?Sized + fmt::Debug> fmt::Debug for RcRefCell<T> {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+impl<T: ?Sized + PartialEq> PartialEq for RcRefCell<T> {
+    #[inline]
+    fn eq(&self, other: &RcRefCell<T>) -> bool {
+        self.deref().eq(other)
+    }
+}
+
+impl<T: ?Sized + PartialOrd> PartialOrd for RcRefCell<T> {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.deref().partial_cmp(other)
+    }
+}
+
+impl<T: ?Sized + Eq> Eq for RcRefCell<T> {}
+
+impl<T: ?Sized + Ord> Ord for RcRefCell<T> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.deref().cmp(other)
+    }
+}
+
+impl<T: ?Sized> Deref for RcRefCell<T> {
     type Target = T;
 
     #[inline]
@@ -22,7 +71,7 @@ impl<T> Deref for RcRefCell<T> {
     }
 }
 
-impl<T> DerefMut for RcRefCell<T> {
+impl<T: ?Sized> DerefMut for RcRefCell<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         let r = self.0.as_ref().borrow_mut().deref_mut() as *mut T;
@@ -44,7 +93,7 @@ fn test_rc_refcell() {
         a.a += num;
     }
 
-    let mut a = RcRefCell::new(A{a: 3});
+    let mut a = RcRefCell::new(A { a: 3 });
     add_a(a.deref_mut(), 10);
     let b = read_a(a.deref());
     assert_eq!(b, 13);
