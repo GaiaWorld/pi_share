@@ -1,3 +1,5 @@
+//! 默认 不带 任何 feature
+//!
 //! 提供五个类型：`Share`， `ShareWeak`,，`ShareMutex`, `ShareRwLock`，`ShareCell`.
 //!
 //! 在feature="rc"时：
@@ -11,6 +13,7 @@
 //! * `ShareU8`等同于`UnsafeCell<u8>`
 //! * `ShareUsize`等同于`UnsafeCell<usize>`
 //! * `SharePtr`等同于`UnsafeCell<T>`
+//! * `ShareRefCell`等同于`Rc(RefCell<T>)`
 //!
 //! 在feature="arc"时:
 //!
@@ -23,12 +26,15 @@
 //! * `ShareU8`等同于`RefCell<u8>`
 //! * `ShareUsize`等同于`RefCell<usize>`
 //! * `SharePtr`等同于`RefCell<T>`
+//! * `ShareRefCell`等同于`Arc(TrustCell<T>)`
+
 #![feature(const_trait_impl)]
 
-
+pub mod atomic;
 pub mod cell;
 pub mod lock;
-pub mod atomic;
+pub mod rc_refcell;
+pub mod arc_trustcell;
 
 #[cfg(feature = "rc")]
 use std::{
@@ -53,13 +59,14 @@ pub type ShareBool = crate::atomic::AtomicCell<bool>;
 pub type ShareU8 = crate::atomic::AtomicCell<u8>;
 #[cfg(feature = "rc")]
 pub type ShareUsize = crate::atomic::AtomicCell<usize>;
+#[cfg(feature = "rc")]
+pub use rc_refcell::RcRefCell as ShareRefCell;
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
     atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, Arc, Mutex,
     RwLock, Weak,
 };
-
 #[cfg(not(feature = "rc"))]
 pub type Share<T> = Arc<T>;
 #[cfg(not(feature = "rc"))]
@@ -78,3 +85,5 @@ pub type ShareBool = AtomicBool;
 pub type ShareU8 = AtomicU8;
 #[cfg(not(feature = "rc"))]
 pub type ShareUsize = AtomicUsize;
+#[cfg(not(feature = "rc"))]
+pub use arc_trustcell::ArcTrustCell as ShareRefCell;
