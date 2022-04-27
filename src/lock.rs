@@ -1,5 +1,5 @@
 
-use std::cell::{RefCell, Ref, RefMut, BorrowError, BorrowMutError};
+use std::cell::{RefCell, Ref, RefMut};
 
 
 #[derive(Debug)]
@@ -22,26 +22,35 @@ impl<T> LockCell<T> {
 
 impl<T: ?Sized> LockCell<T> {
 
-    pub fn get_mut(&mut self) -> Result<RefMut<'_, T>, BorrowMutError> {
-        self.0.try_borrow_mut()
+    pub fn get_mut(&mut self) -> RefMut<'_, T> {
+        self.0.borrow_mut()
     }
-    pub fn read(&self) -> Result<Ref<'_, T>, BorrowError> {
-        self.0.try_borrow()
+    pub fn read(&self) -> Ref<'_, T> {
+        self.0.borrow()
     }
-    pub fn try_read(&self) -> Result<Ref<'_, T>, BorrowError> {
-        self.0.try_borrow()
+    pub fn try_read(&self) -> Option<Ref<'_, T>> {
+        match self.0.try_borrow() {
+            Ok(r) => Some(r),
+            _ => None
+        }
     }
-    pub fn write(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
-        self.0.try_borrow_mut()
+    pub fn write(&self) -> RefMut<'_, T> {
+        self.0.borrow_mut()
     }
-    pub fn try_write(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
-        self.0.try_borrow_mut()
+    pub fn try_write(&self) -> Option<RefMut<'_, T>> {
+        match self.0.try_borrow_mut() {
+            Ok(r) => Some(r),
+            _ => None
+        }
     }
-    pub fn lock(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
-        self.0.try_borrow_mut()
+    pub fn lock(&self) -> RefMut<'_, T> {
+        self.0.borrow_mut()
     }
-    pub fn try_lock(&self) -> Result<RefMut<'_, T>, BorrowMutError> {
-        self.0.try_borrow_mut()
+    pub fn try_lock(&self) -> Option<RefMut<'_, T>> {
+        match self.0.try_borrow_mut() {
+            Ok(r) => Some(r),
+            _ => None
+        }
     }
 }
 
