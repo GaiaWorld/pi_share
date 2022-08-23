@@ -35,7 +35,7 @@ pub struct Ref<'a, T: 'a + ?Sized> {
     value: &'a T,
 }
 
-impl<'a, T> Deref for Ref<'a, T> {
+impl<'a, T: ?Sized> Deref for Ref<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -58,7 +58,7 @@ pub struct RefMut<'a, T: 'a + ?Sized> {
     value: &'a mut T,
 }
 
-impl<'a, T> Deref for RefMut<'a, T> {
+impl<'a, T: ?Sized> Deref for RefMut<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -66,7 +66,7 @@ impl<'a, T> Deref for RefMut<'a, T> {
     }
 }
 
-impl<'a, T> DerefMut for RefMut<'a, T> {
+impl<'a, T: ?Sized> DerefMut for RefMut<'a, T> {
     fn deref_mut(&mut self) -> &mut T {
         self.value
     }
