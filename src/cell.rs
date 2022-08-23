@@ -30,7 +30,7 @@ impl Error for InvalidBorrow {
 ///
 /// Access the value via `std::ops::Deref` (e.g. `*val`)
 #[derive(Debug)]
-pub struct Ref<'a, T: 'a> {
+pub struct Ref<'a, T: 'a + ?Sized> {
     flag: &'a AtomicUsize,
     value: &'a T,
 }
@@ -43,7 +43,7 @@ impl<'a, T> Deref for Ref<'a, T> {
     }
 }
 
-impl<'a, T> Drop for Ref<'a, T> {
+impl<'a, T: ?Sized> Drop for Ref<'a, T> {
     fn drop(&mut self) {
         self.flag.fetch_sub(1, Ordering::Release);
     }
@@ -53,7 +53,7 @@ impl<'a, T> Drop for Ref<'a, T> {
 ///
 /// Access the value via `std::ops::DerefMut` (e.g. `*val`)
 #[derive(Debug)]
-pub struct RefMut<'a, T: 'a> {
+pub struct RefMut<'a, T: 'a + ?Sized> {
     flag: &'a AtomicUsize,
     value: &'a mut T,
 }
@@ -72,7 +72,7 @@ impl<'a, T> DerefMut for RefMut<'a, T> {
     }
 }
 
-impl<'a, T> Drop for RefMut<'a, T> {
+impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
     fn drop(&mut self) {
         self.flag.store(0, Ordering::Release)
     }
@@ -88,22 +88,24 @@ unsafe impl<T: ?Sized> Sync for TrustCell<T> where T: Sync {}
 unsafe impl<T: ?Sized> Send for TrustCell<T> where T: Send {}
 
 impl<T> TrustCell<T> {
-    /// Create a new cell, similar to `RefCell::new`
-    pub fn new(val: T) -> Self {
+	 /// Create a new cell, similar to `RefCell::new`
+	 pub fn new(val: T) -> Self {
         TrustCell {
             flag: AtomicUsize::new(0),
             inner: UnsafeCell::new(val),
         }
     }
+	/// Consumes this cell and returns ownership of `T`.
+	pub fn into_inner(self) -> T {
+		self.inner.into_inner()
+	}
+}
+
+impl<T: ?Sized> TrustCell<T> {
 
 	pub fn as_ptr(&self) -> *mut T {
 		self.inner.get()
 	}
-
-    /// Consumes this cell and returns ownership of `T`.
-    pub fn into_inner(self) -> T {
-        self.inner.into_inner()
-    }
 
     /// Get an immutable reference to the inner data.
     ///
