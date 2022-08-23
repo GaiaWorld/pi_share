@@ -63,6 +63,9 @@ pub type ShareUsize = crate::atomic::AtomicCell<usize>;
 #[cfg(feature = "rc")]
 pub use rc_refcell::RcRefCell as ShareRefCell;
 
+#[cfg(feature = "rc")]
+pub type Cell<T> = std::cell::RefCell<T>;
+
 #[cfg(not(feature = "rc"))]
 use std::sync::{
     atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, Arc, 
@@ -88,3 +91,5 @@ pub type ShareU8 = AtomicU8;
 pub type ShareUsize = AtomicUsize;
 #[cfg(not(feature = "rc"))]
 pub use arc_trustcell::ArcTrustCell as ShareRefCell;
+#[cfg(not(feature = "rc"))]
+pub type Cell<T> = crate::cell::TrustCell<T>;
