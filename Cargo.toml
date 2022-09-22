@@ -1,6 +1,6 @@
 [package]
 name = "pi_share"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "rc, arc, lock, atomic"
@@ -9,8 +9,8 @@ license = "MIT OR Apache-2.0"
 keywords = ["pi", "share", "pi_share"]
 
 [features]
-defualt = []
 rc = []
+serial = []
 
 [dependencies]
 parking_lot = "0.12"

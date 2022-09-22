@@ -37,6 +37,20 @@ pub mod lock;
 pub mod rc_refcell;
 pub mod arc_trustcell;
 
+#[cfg(feature = "serial")]
+pub trait ThreadBound: 'static {}
+
+#[cfg(feature = "serial")]
+impl<T: 'static> ThreadBound for T {}
+
+#[cfg(not(feature = "serial"))]
+pub trait ThreadBound: Send + 'static {}
+
+#[cfg(not(feature = "serial"))]
+impl<T: Send + 'static> ThreadBound for T {}
+
+
+
 #[cfg(feature = "rc")]
 use std::{
     cell::RefCell,
