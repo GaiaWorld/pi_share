@@ -38,24 +38,22 @@ pub mod rc_refcell;
 pub mod arc_trustcell;
 
 #[cfg(feature = "serial")]
-pub trait ThreadBound: 'static {}
+pub trait ThreadSend {}
 #[cfg(feature = "serial")]
-impl<T: 'static> ThreadBound for T {}
-
+impl<T> ThreadSend for T {}
 #[cfg(feature = "serial")]
-pub trait ThreadSync: 'static {}
+pub trait ThreadSync {}
 #[cfg(feature = "serial")]
-impl<T: 'static> ThreadSync for T {}
-
-#[cfg(not(feature = "serial"))]
-impl<T: Send + 'static> ThreadBound for T {}
-#[cfg(not(feature = "serial"))]
-pub trait ThreadBound: Send + 'static {}
+impl<T> ThreadSync for T {}
 
 #[cfg(not(feature = "serial"))]
-pub trait ThreadSync: Sync + Send + 'static {}
+pub trait ThreadSend: Send {}
 #[cfg(not(feature = "serial"))]
-impl<T: Sync + Send + 'static> ThreadSync for T {}
+impl<T: Send> ThreadSend for T {}
+#[cfg(not(feature = "serial"))]
+pub trait ThreadSync: Sync + Send {}
+#[cfg(not(feature = "serial"))]
+impl<T: Sync + Send> ThreadSync for T {}
 
 
 
