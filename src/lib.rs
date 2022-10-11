@@ -1,41 +1,32 @@
 //! 默认 不带 任何 feature
 //!
-//! 提供五个类型：`Share`， `ShareWeak`,，`ShareMutex`, `ShareRwLock`，`ShareCell`.
+//! ## 1. 几个类型封装
 //!
-//! 在feature="rc"时：
+//! + `Share` = `Rc` | `Arc`
+//! + `ShareWeak` = `rc::Weak` | `sync::Weak`
+//! + `ShareMutex` = `LockCell(RefCell<T>)` | parking_lot::Mutex
+//! + `ShareRwLock` = `LockCell(RefCell<T>)` | `parking_lot::RwLock`
+//! + `ShareCell` = `std::cell::RefCell` | `cell::TrustCell`
+//! + `SharePtr` = `UnsafeCell<T>` | `AtomicPtr<T>`
+//! + `ShareRefCell` = `Rc(RefCell<T>)` | `Arc(TrustCell<T>)`
+//! + `ShareBool` = `UnsafeCell<bool>` | `AtomicBool`
+//! + `ShareU8` = `UnsafeCell<u8>` | `AtomicU8`
+//! + `ShareUsize` = `UnsafeCell<usize>` | `AtomicUsize`
 //!
-//! * `Share`等同于`std::rc::Rc`
-//! * `ShareWeak`等同于`std::rc::Weak`
-//! * `ShareMutex`等同于`LockCell(RefCell<T>)`
-//! * `ShareRwLock`等同于`LockCell(RefCell<T>)`
-//! * `ShareCell`等同于`std::cell::RefCell`
-//! * `ShareBool`等同于`UnsafeCell<bool>`
-//! * `ShareU8`等同于`UnsafeCell<u8>`
-//! * `ShareUsize`等同于`UnsafeCell<usize>`
-//! * `SharePtr`等同于`UnsafeCell<T>`
-//! * `ShareRefCell`等同于`Rc(RefCell<T>)`
+//! ## 2. 提供 Send, Sync 的 封装
 //!
-//! 在feature="arc"时:
+//! 目的：wasm 不支持 Send + Sync
 //!
-//! * `Share`等同于`std::sync::Arc`,
-//! * `ShareWeak`等同于`std::sync::Weak`.
-//! * `ShareMutex`等同于`parking_lot::Mutex`
-//! * `ShareRwLock`等同于`parking_lot::RwLock`
-//! * `ShareCell`等同于`cell::TrustCell`
-//! * `ShareBool`等同于`RefCell<bool>`
-//! * `ShareU8`等同于`RefCell<u8>`
-//! * `ShareUsize`等同于`RefCell<usize>`
-//! * `SharePtr`等同于`RefCell<T>`
-//! * `ShareRefCell`等同于`Arc(TrustCell<T>)`
-//! 
+//! + ThreadSend = Send
+//! + ThreadSync = Sync + Send
+//!
 
 #![feature(const_trait_impl)]
-
+pub mod arc_trustcell;
 pub mod atomic;
 pub mod cell;
 pub mod lock;
 pub mod rc_refcell;
-pub mod arc_trustcell;
 
 #[cfg(feature = "serial")]
 pub trait ThreadSend {}
@@ -54,8 +45,6 @@ impl<T: Send> ThreadSend for T {}
 pub trait ThreadSync: Sync + Send {}
 #[cfg(not(feature = "serial"))]
 impl<T: Sync + Send> ThreadSync for T {}
-
-
 
 #[cfg(feature = "rc")]
 use std::{
@@ -88,8 +77,7 @@ pub type Cell<T> = std::cell::RefCell<T>;
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
-    atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, Arc, 
-    Weak,
+    atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, Arc, Weak,
 };
 #[cfg(not(feature = "rc"))]
 pub type Share<T> = Arc<T>;
