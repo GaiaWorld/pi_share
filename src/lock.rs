@@ -59,7 +59,7 @@ impl<T: Default> Default for LockCell<T> {
         LockCell::new(Default::default())
     }
 }
-impl<T> const From<T> for LockCell<T> {
+impl<T> From<T> for LockCell<T> {
     fn from(t: T) -> Self {
         LockCell::new(t)
     }
