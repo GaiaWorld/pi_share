@@ -1,16 +1,17 @@
 
-use std::cell::{RefCell, Ref, RefMut};
+
+use crate::cell::{TrustCell, Ref, RefMut};
 
 
 #[derive(Debug)]
-pub struct LockCell<T: ?Sized>(RefCell<T>);
+pub struct LockCell<T>(TrustCell<T>);
 unsafe impl<T> Sync for LockCell<T> where T: Sync {}
 unsafe impl<T> Send for LockCell<T> where T: Send {}
 
 impl<T> LockCell<T> {
     #[inline]
     pub const fn new(value: T) -> Self {
-        LockCell(RefCell::new(value))
+        LockCell(TrustCell::new(value))
     }
     pub fn into_inner(self) -> T {
         self.0.into_inner()
@@ -20,7 +21,7 @@ impl<T> LockCell<T> {
     }
 }
 
-impl<T: ?Sized> LockCell<T> {
+impl<T> LockCell<T> {
 
     pub fn get_mut(&mut self) -> RefMut<'_, T> {
         self.0.borrow_mut()

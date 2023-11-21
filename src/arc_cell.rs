@@ -1,73 +1,82 @@
+use crate::cell::{TrustCell, RefMut, InvalidBorrow};
 use std::{
-    cell::RefCell,
     cmp::Ordering,
     fmt,
     hash::{Hash, Hasher},
     ops::{Deref, DerefMut},
-    rc::Rc,
+    sync::Arc,
 };
 
-pub struct RcRefCell<T: ?Sized>(pub Rc<RefCell<T>>);
+pub struct ArcCell<T>(pub Arc<TrustCell<T>>);
 
-impl<T: Sized> RcRefCell<T> {
+impl<T> ArcCell<T> {
     #[inline]
     pub fn new(value: T) -> Self {
-        RcRefCell(Rc::new(RefCell::new(value)))
+        ArcCell(Arc::new(TrustCell::new(value)))
+    }
+    pub fn ptr_eq(&self, other: &ArcCell<T>) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub fn borrow_mut(&self) -> RefMut<'_, T> {
+        self.0.as_ref().borrow_mut()
+    }
+    pub fn try_borrow_mut(&self) -> Result<RefMut<T>, InvalidBorrow> {
+        self.0.as_ref().try_borrow_mut()
     }
 }
 
-impl<T: ?Sized> Clone for RcRefCell<T> {
+impl<T> Clone for ArcCell<T> {
     #[inline]
     fn clone(&self) -> Self {
         Self(self.0.clone())
     }
 }
 
-impl<T: ?Sized + Hash> Hash for RcRefCell<T> {
+impl<T: Hash> Hash for ArcCell<T> {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.deref().hash(state);
     }
 }
 
-impl<T: ?Sized + fmt::Display> fmt::Display for RcRefCell<T> {
+impl<T: fmt::Display> fmt::Display for ArcCell<T> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.deref().fmt(f)
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for RcRefCell<T> {
+impl<T: fmt::Debug> fmt::Debug for ArcCell<T> {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.deref().fmt(f)
     }
 }
 
-impl<T: ?Sized + PartialEq> PartialEq for RcRefCell<T> {
+impl<T: PartialEq> PartialEq for ArcCell<T> {
     #[inline]
-    fn eq(&self, other: &RcRefCell<T>) -> bool {
+    fn eq(&self, other: &ArcCell<T>) -> bool {
         self.deref().eq(other)
     }
 }
 
-impl<T: ?Sized + PartialOrd> PartialOrd for RcRefCell<T> {
+impl<T: PartialOrd> PartialOrd for ArcCell<T> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.deref().partial_cmp(other)
     }
 }
 
-impl<T: ?Sized + Eq> Eq for RcRefCell<T> {}
+impl<T: Eq> Eq for ArcCell<T> {}
 
-impl<T: ?Sized + Ord> Ord for RcRefCell<T> {
+impl<T: Ord> Ord for ArcCell<T> {
     #[inline]
     fn cmp(&self, other: &Self) -> Ordering {
         self.deref().cmp(other)
     }
 }
 
-impl<T: ?Sized> Deref for RcRefCell<T> {
+impl<T> Deref for ArcCell<T> {
     type Target = T;
 
     #[inline]
@@ -77,7 +86,7 @@ impl<T: ?Sized> Deref for RcRefCell<T> {
     }
 }
 
-impl<T: ?Sized> DerefMut for RcRefCell<T> {
+impl<T> DerefMut for ArcCell<T> {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         let r = self.0.as_ref().borrow_mut().deref_mut() as *mut T;
@@ -86,7 +95,7 @@ impl<T: ?Sized> DerefMut for RcRefCell<T> {
 }
 
 #[test]
-fn test_rc_refcell() {
+fn test_arc_trustcell() {
     struct A {
         pub a: u32,
     }
@@ -99,7 +108,7 @@ fn test_rc_refcell() {
         a.a += num;
     }
 
-    let mut a = RcRefCell::new(A { a: 3 });
+    let mut a = ArcCell::new(A { a: 3 });
     add_a(a.deref_mut(), 10);
     let b = read_a(a.deref());
     assert_eq!(b, 13);

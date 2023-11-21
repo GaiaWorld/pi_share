@@ -2,13 +2,13 @@
 //!
 //! ## 1. 几个类型封装
 //!
-//! + `Share` = `Rc` | `Arc`
-//! + `ShareWeak` = `rc::Weak` | `sync::Weak`
+//! + `Share` = `Xrc` | `Arc`
+//! + `ShareWeak` = `xrc::Weak` | `sync::Weak`
 //! + `ShareMutex` = `LockCell(RefCell<T>)` | parking_lot::Mutex
 //! + `ShareRwLock` = `LockCell(RefCell<T>)` | `parking_lot::RwLock`
-//! + `ShareCell` = `std::cell::RefCell` | `cell::TrustCell`
+//! + `ShareCell` = `cell::TrustCell`
 //! + `SharePtr` = `UnsafeCell<T>` | `AtomicPtr<T>`
-//! + `ShareRefCell` = `Rc(RefCell<T>)` | `Arc(TrustCell<T>)`
+//! + `ShareRefCell` = `XrcCell<T>` | `ArcCell<T>`
 //! + `ShareBool` = `UnsafeCell<bool>` | `AtomicBool`
 //! + `ShareU8` = `UnsafeCell<u8>` | `AtomicU8`
 //! + `ShareU32` = `UnsafeCell<u32>` | `AtomicU32`
@@ -23,11 +23,32 @@
 //!
 
 #![feature(const_trait_impl)]
-pub mod arc_trustcell;
+#![feature(allocator_api)]
+#![feature(receiver_trait)]
+#![feature(core_intrinsics)]
+#![feature(strict_provenance)]
+#![feature(error_in_core)]
+#![feature(error_generic_member_access)]
+#![feature(provide_any)]
+#![feature(layout_for_ptr)]
+#![feature(trusted_len)]
+#![feature(slice_ptr_get)]
+#![feature(ptr_internals)]
+#![feature(set_ptr_value)]
+#![feature(pointer_byte_offsets)]
+#![feature(alloc_layout_extra)]
+#![feature(specialization)]
+
+pub mod arc_cell;
 pub mod atomic;
 pub mod cell;
 pub mod lock;
-pub mod rc_refcell;
+pub mod xrc;
+pub mod xrc_cell;
+
+
+pub type ShareCell<T> = cell::TrustCell<T>;
+pub type Cell<T> = cell::TrustCell<T>;
 
 #[cfg(feature = "serial")]
 pub trait ThreadSend {}
@@ -47,22 +68,14 @@ pub trait ThreadSync: Sync + Send {}
 #[cfg(not(feature = "serial"))]
 impl<T: Sync + Send> ThreadSync for T {}
 
-
 #[cfg(feature = "rc")]
-use std::{
-    cell::RefCell,
-    rc::{Rc, Weak},
-};
+pub type Share<T> = Xrc<T>;
 #[cfg(feature = "rc")]
-pub type Share<T> = Rc<T>;
-#[cfg(feature = "rc")]
-pub type ShareWeak<T> = Weak<T>;
+pub type ShareWeak<T> = xrc::Weak<T>;
 #[cfg(feature = "rc")]
 pub type ShareMutex<T> = crate::lock::LockCell<T>;
 #[cfg(feature = "rc")]
 pub type ShareRwLock<T> = crate::lock::LockCell<T>;
-#[cfg(feature = "rc")]
-pub type ShareCell<T> = RefCell<T>;
 #[cfg(feature = "rc")]
 pub type SharePtr<T> = crate::atomic::AtomicCell<T>;
 #[cfg(feature = "rc")]
@@ -74,15 +87,14 @@ pub type ShareUsize = crate::atomic::AtomicCell<usize>;
 #[cfg(feature = "rc")]
 pub type ShareU32 = crate::atomic::AtomicCell<u32>;
 #[cfg(feature = "rc")]
-pub use rc_refcell::RcRefCell as ShareRefCell;
+pub use xrc_cell::XrcCell as ShareRefCell;
 
-#[cfg(feature = "rc")]
-pub type Cell<T> = std::cell::RefCell<T>;
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
     atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, atomic::AtomicU32, Arc, Weak,
 };
+
 #[cfg(not(feature = "rc"))]
 pub type Share<T> = Arc<T>;
 #[cfg(not(feature = "rc"))]
@@ -91,8 +103,6 @@ pub type ShareWeak<T> = Weak<T>;
 pub type ShareMutex<T> = parking_lot::Mutex<T>;
 #[cfg(not(feature = "rc"))]
 pub type ShareRwLock<T> = parking_lot::RwLock<T>;
-#[cfg(not(feature = "rc"))]
-pub type ShareCell<T> = cell::TrustCell<T>;
 #[cfg(not(feature = "rc"))]
 pub type SharePtr<T> = AtomicPtr<T>;
 #[cfg(not(feature = "rc"))]
@@ -104,6 +114,4 @@ pub type ShareUsize = AtomicUsize;
 #[cfg(not(feature = "rc"))]
 pub type ShareU32 = AtomicU32;
 #[cfg(not(feature = "rc"))]
-pub use arc_trustcell::ArcTrustCell as ShareRefCell;
-#[cfg(not(feature = "rc"))]
-pub type Cell<T> = crate::cell::TrustCell<T>;
+pub use arc_cell::ArcCell as ShareRefCell;
