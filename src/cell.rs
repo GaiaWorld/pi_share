@@ -91,7 +91,7 @@ impl<'a, T: ?Sized> Ref<'a, T> {
     /// stored in the `TrustCell`.
     ///
     /// ```
-    /// use rafx_base::trust_cell::{Ref, TrustCell};
+    /// use pi_share::cell::{Ref, TrustCell};
     ///
     /// let cb = TrustCell::new(Box::new(5));
     ///
@@ -110,7 +110,7 @@ impl<'a, T: ?Sized> Ref<'a, T> {
     /// value.
     ///
     /// ```rust
-    /// # use rafx_base::trust_cell::{TrustCell, Ref};
+    /// # use pi_share::cell::{TrustCell, Ref};
     ///
     /// let c = TrustCell::new((5, 'b'));
     /// let b1: Ref<'_, (u32, char)> = c.borrow();
@@ -195,7 +195,7 @@ impl<'a, T: ?Sized> RefMut<'a, T> {
     /// stored in the `TrustCell`.
     ///
     /// ```
-    /// use rafx_base::trust_cell::{RefMut, TrustCell};
+    /// use pi_share::cell::{RefMut, TrustCell};
     ///
     /// let cb = TrustCell::new(Box::new(5));
     ///
@@ -214,7 +214,7 @@ impl<'a, T: ?Sized> RefMut<'a, T> {
     /// value.
     ///
     /// ```rust
-    /// # use rafx_base::trust_cell::{TrustCell, RefMut};
+    /// # use pi_share::cell::{TrustCell, RefMut};
     ///
     /// let c = TrustCell::new((5, 'b'));
     ///
@@ -271,12 +271,12 @@ impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
 
 /// A custom cell container that is a `RefCell` with thread-safety.
 #[derive(Debug)]
-pub struct TrustCell<T> {
+pub struct TrustCell<T: ?Sized> {
     flag: ShareUsize,
     inner: UnsafeCell<T>,
 }
-unsafe impl<T> Sync for TrustCell<T> where T: Sync {}
-unsafe impl<T> Send for TrustCell<T> where T: Send {}
+unsafe impl<T: ?Sized> Sync for TrustCell<T> where T: Sync {}
+unsafe impl<T: ?Sized> Send for TrustCell<T> where T: Send {}
 
 impl<T> TrustCell<T> {
     /// Create a new cell, similar to `RefCell::new`
@@ -290,7 +290,10 @@ impl<T> TrustCell<T> {
     pub fn into_inner(self) -> T {
         self.inner.into_inner()
     }
+}
 
+
+impl<T: Sized> TrustCell<T> {
     /// Get an immutable reference to the inner data.
     ///
     /// Absence of write accesses is checked at run-time.
@@ -404,10 +407,6 @@ impl<T> TrustCell<T> {
             _ => Err(InvalidBorrow),
         }
     }
-}
-
-
-impl<T: Sized> TrustCell<T> {
     pub fn as_ptr(&self) -> *mut T {
         self.inner.get()
     }

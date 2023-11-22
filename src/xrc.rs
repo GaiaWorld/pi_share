@@ -1613,8 +1613,8 @@ impl<T: Clone> Xrc<T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(Xrc_unwrap_or_clone)]
-    /// # use std::{ptr, sync::Xrc};
+    /// # use std::ptr;
+    /// use pi_share::xrc::Xrc;
     /// let inner = String::from("test");
     /// let ptr = inner.as_ptr();
     ///
@@ -1856,6 +1856,7 @@ impl Xrc<dyn Any + Send + Sync> {
     /// # Examples
     ///
     /// ```
+    /// 
     /// use std::any::Any;
     /// use pi_share::xrc::Xrc;
     ///
