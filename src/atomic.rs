@@ -1,14 +1,14 @@
-use std::{cell::UnsafeCell, mem, sync::atomic::Ordering};
+use std::{cell::SyncUnsafeCell, mem, sync::atomic::Ordering};
 
 
 #[derive(Debug)]
-pub struct AtomicCell<T: ?Sized>(UnsafeCell<T>);
+pub struct AtomicCell<T: ?Sized>(SyncUnsafeCell<T>);
 unsafe impl<T> Sync for AtomicCell<T> where T: Sync {}
 unsafe impl<T> Send for AtomicCell<T> where T: Send {}
 
 impl<T> AtomicCell<T> {
     pub const fn new(value: T) -> Self {
-        AtomicCell(UnsafeCell::new(value))
+        AtomicCell(SyncUnsafeCell::new(value))
     }
     pub fn get_mut(&mut self) -> &mut T {
         self.0.get_mut()

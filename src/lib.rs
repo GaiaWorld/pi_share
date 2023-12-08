@@ -7,12 +7,12 @@
 //! + `ShareMutex` = `LockCell(RefCell<T>)` | parking_lot::Mutex
 //! + `ShareRwLock` = `LockCell(RefCell<T>)` | `parking_lot::RwLock`
 //! + `ShareCell` = `cell::TrustCell`
-//! + `SharePtr` = `UnsafeCell<T>` | `AtomicPtr<T>`
+//! + `SharePtr` = `SyncUnsafeCell<T>` | `AtomicPtr<T>`
 //! + `ShareRefCell` = `XrcCell<T>` | `ArcCell<T>`
-//! + `ShareBool` = `UnsafeCell<bool>` | `AtomicBool`
-//! + `ShareU8` = `UnsafeCell<u8>` | `AtomicU8`
-//! + `ShareU32` = `UnsafeCell<u32>` | `AtomicU32`
-//! + `ShareUsize` = `UnsafeCell<usize>` | `AtomicUsize`
+//! + `ShareBool` = `SyncUnsafeCell<bool>` | `AtomicBool`
+//! + `ShareU8` = `SyncUnsafeCell<u8>` | `AtomicU8`
+//! + `ShareU32` = `SyncUnsafeCell<u32>` | `AtomicU32`
+//! + `ShareUsize` = `SyncUnsafeCell<usize>` | `AtomicUsize`
 //!
 //! ## 2. 提供 Send, Sync 的 封装
 //!
@@ -21,7 +21,7 @@
 //! + ThreadSend = Send
 //! + ThreadSync = Sync + Send
 //!
-
+#![feature(sync_unsafe_cell)]
 #![feature(const_trait_impl)]
 #![feature(allocator_api)]
 #![feature(receiver_trait)]

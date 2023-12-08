@@ -16,7 +16,7 @@
 use std::error::Error;
 
 use std::{
-    cell::UnsafeCell,
+    cell::SyncUnsafeCell,
     fmt::{Display, Error as FormatError, Formatter},
     ops::{Deref, DerefMut},
     sync::atomic::Ordering,
@@ -273,7 +273,7 @@ impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
 #[derive(Debug)]
 pub struct TrustCell<T: ?Sized> {
     flag: ShareUsize,
-    inner: UnsafeCell<T>,
+    inner: SyncUnsafeCell<T>,
 }
 unsafe impl<T: ?Sized> Sync for TrustCell<T> where T: Sync {}
 unsafe impl<T: ?Sized> Send for TrustCell<T> where T: Send {}
@@ -283,7 +283,7 @@ impl<T> TrustCell<T> {
     pub const fn new(val: T) -> Self {
         TrustCell {
             flag: ShareUsize::new(0),
-            inner: UnsafeCell::new(val),
+            inner: SyncUnsafeCell::new(val),
         }
     }
     /// Consumes this cell and returns ownership of `T`.
