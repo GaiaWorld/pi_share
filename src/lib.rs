@@ -88,7 +88,10 @@ pub type ShareUsize = crate::atomic::AtomicCell<usize>;
 pub type ShareU32 = crate::atomic::AtomicCell<u32>;
 #[cfg(feature = "rc")]
 pub use xrc_cell::XrcCell as ShareRefCell;
-
+#[cfg(feature = "rc")]
+#[inline(always)]
+pub fn fence(or: std::sync::atomic::Ordering) {
+}
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
@@ -115,3 +118,8 @@ pub type ShareUsize = AtomicUsize;
 pub type ShareU32 = AtomicU32;
 #[cfg(not(feature = "rc"))]
 pub use arc_cell::ArcCell as ShareRefCell;
+#[cfg(not(feature = "rc"))]
+#[inline(always)]
+pub fn fence(or: std::sync::atomic::Ordering) {
+    std::sync::atomic::fence(or)
+}
