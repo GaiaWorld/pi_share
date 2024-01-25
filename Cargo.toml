@@ -1,6 +1,6 @@
 [package]
 name = "pi_share"
-version = "0.4.10"
+version = "0.4.12"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "rc, arc, lock, atomic"
