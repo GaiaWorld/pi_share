@@ -4,8 +4,8 @@
 //!
 //! + `Share` = `Xrc` | `Arc`
 //! + `ShareWeak` = `xrc::Weak` | `sync::Weak`
-//! + `ShareMutex` = `LockCell(RefCell<T>)` | parking_lot::Mutex
-//! + `ShareRwLock` = `LockCell(RefCell<T>)` | `parking_lot::RwLock`
+//! + `ShareMutex` = `LockCell(RefCell<T>)` | Mutex
+//! + `ShareRwLock` = `LockCell(RefCell<T>)` | `RwLock`
 //! + `ShareCell` = `cell::TrustCell`
 //! + `SharePtr` = `SyncUnsafeCell<T>` | `AtomicPtr<T>`
 //! + `ShareRefCell` = `XrcCell<T>` | `ArcCell<T>`
@@ -45,7 +45,6 @@ pub mod cell;
 pub mod lock;
 pub mod xrc;
 pub mod xrc_cell;
-
 
 pub type ShareCell<T> = cell::TrustCell<T>;
 pub type Cell<T> = cell::TrustCell<T>;
@@ -87,15 +86,17 @@ pub type ShareUsize = crate::atomic::AtomicCell<usize>;
 #[cfg(feature = "rc")]
 pub type ShareU32 = crate::atomic::AtomicCell<u32>;
 #[cfg(feature = "rc")]
+pub type ShareU64 = crate::atomic::AtomicCell<u64>;
+#[cfg(feature = "rc")]
 pub use xrc_cell::XrcCell as ShareRefCell;
 #[cfg(feature = "rc")]
 #[inline(always)]
-pub fn fence(or: std::sync::atomic::Ordering) {
-}
+pub fn fence(or: std::sync::atomic::Ordering) {}
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
-    atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, atomic::AtomicU32, Arc, Weak, Mutex, RwLock 
+    atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicU8, AtomicUsize},
+    Arc, Mutex, RwLock, Weak,
 };
 
 #[cfg(not(feature = "rc"))]
@@ -116,6 +117,8 @@ pub type ShareU8 = AtomicU8;
 pub type ShareUsize = AtomicUsize;
 #[cfg(not(feature = "rc"))]
 pub type ShareU32 = AtomicU32;
+#[cfg(not(feature = "rc"))]
+pub type ShareU64 = AtomicU64;
 #[cfg(not(feature = "rc"))]
 pub use arc_cell::ArcCell as ShareRefCell;
 #[cfg(not(feature = "rc"))]
