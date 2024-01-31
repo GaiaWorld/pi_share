@@ -95,7 +95,7 @@ pub fn fence(or: std::sync::atomic::Ordering) {
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
-    atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, atomic::AtomicU32, Arc, Weak,
+    atomic::AtomicBool, atomic::AtomicPtr, atomic::AtomicU8, atomic::AtomicUsize, atomic::AtomicU32, Arc, Weak, Mutex, RwLock 
 };
 
 #[cfg(not(feature = "rc"))]
@@ -103,9 +103,9 @@ pub type Share<T> = Arc<T>;
 #[cfg(not(feature = "rc"))]
 pub type ShareWeak<T> = Weak<T>;
 #[cfg(not(feature = "rc"))]
-pub type ShareMutex<T> = parking_lot::Mutex<T>;
+pub type ShareMutex<T> = Mutex<T>;
 #[cfg(not(feature = "rc"))]
-pub type ShareRwLock<T> = parking_lot::RwLock<T>;
+pub type ShareRwLock<T> = RwLock<T>;
 #[cfg(not(feature = "rc"))]
 pub type SharePtr<T> = AtomicPtr<T>;
 #[cfg(not(feature = "rc"))]

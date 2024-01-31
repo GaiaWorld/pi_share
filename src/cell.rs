@@ -293,7 +293,7 @@ impl<T> TrustCell<T> {
 }
 
 
-impl<T: Sized> TrustCell<T> {
+impl<T: ?Sized> TrustCell<T> {
     /// Get an immutable reference to the inner data.
     ///
     /// Absence of write accesses is checked at run-time.
