@@ -1,3 +1,4 @@
+
 //! Thread-safe reference-counting pointers.
 //!
 //! See the [`Xrc<T>`][Xrc] documentation for more details.
@@ -6,19 +7,20 @@
 //! loads and stores of pointers. This may be detected at compile time using
 //! `#[cfg(target_has_atomic = "ptr")]`.
 
-use crate::ShareUsize;
-
 use core::any::Any;
 use core::borrow;
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::hint;
+use std::ops::Deref;
+use std::process::abort;
 #[cfg(not(no_global_oom_handling))]
-use core::iter;
 use core::marker::PhantomData;
 #[cfg(not(no_global_oom_handling))]
-use core::ops::Deref;
+use core::mem::size_of_val;
+use core::mem::{self, align_of_val_raw};
+use core::ops::Receiver;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
@@ -32,14 +34,12 @@ use std::alloc::handle_alloc_error;
 use std::alloc::{AllocError, Allocator, Global, Layout};
 use std::borrow::{Cow, ToOwned};
 use std::boxed::Box;
-use std::intrinsics::{abort, min_align_of_val};
-use std::mem::{align_of_val_raw, forget, size_of_val, ManuallyDrop, MaybeUninit};
-use std::ops::Receiver;
-use std::ptr::Unique;
 #[cfg(not(no_global_oom_handling))]
 use std::string::String;
 #[cfg(not(no_global_oom_handling))]
 use std::vec::Vec;
+
+use crate::ShareUsize;
 
 /// A soft limit on the amount of references that may be made to an `Xrc`.
 ///
@@ -54,6 +54,16 @@ const MAX_REFCOUNT: usize = (isize::MAX) as usize;
 
 /// The error in case either counter reaches above `MAX_REFCOUNT`, and we can `panic` safely.
 const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
+
+
+// ThreadSanitizer does not support memory fences. To avoid false positive
+// reports in Xrc / Weak implementation use atomic loads for synchronization
+// instead.
+macro_rules! acquire {
+    ($x:expr) => {
+        $x.load(Acquire)
+    };
+}
 
 /// A thread-safe reference-counting pointer. 'Xrc' stands for 'Atomically
 /// Reference Counted'.
@@ -131,7 +141,7 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 ///
 /// ## `Deref` behavior
 ///
-/// `Xrc<T>` automatically dereferences to `T` (via the [`Deref`][deref] trait),
+/// `Xrc<T>` automatically dereferences to `T` (via the [`Deref`] trait),
 /// so you can call `T`'s methods on a value of type `Xrc<T>`. To avoid name
 /// clashes with `T`'s methods, the methods of `Xrc<T>` itself are associated
 /// functions, called using [fully qualified syntax]:
@@ -139,8 +149,8 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 /// ```
 /// use pi_share::xrc::Xrc;
 ///
-/// let my_Xrc = Xrc::new(());
-/// let my_weak = Xrc::downgrade(&my_Xrc);
+/// let my_xrc = Xrc::new(());
+/// let my_weak = Xrc::downgrade(&my_xrc);
 /// ```
 ///
 /// `Xrc<T>`'s implementations of traits like `Clone` may also be called using
@@ -150,11 +160,11 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 /// ```
 /// use pi_share::xrc::Xrc;
 ///
-/// let Xrc = Xrc::new(());
+/// let xrc = Xrc::new(());
 /// // Method-call syntax
-/// let Xrc2 = Xrc.clone();
+/// let xrc2 = xrc.clone();
 /// // Fully qualified syntax
-/// let Xrc3 = Xrc::clone(&Xrc);
+/// let xrc3 = Xrc::clone(&xrc);
 /// ```
 ///
 /// [`Weak<T>`][Weak] does not auto-dereference to `T`, because the inner value may have
@@ -165,7 +175,6 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 /// [mutex]: ../../std/sync/struct.Mutex.html
 /// [rwlock]: ../../std/sync/struct.RwLock.html
 /// [atomic]: core::sync::atomic
-/// [deref]: core::ops::Deref
 /// [downgrade]: Xrc::downgrade
 /// [upgrade]: Weak::upgrade
 /// [RefCell\<T>]: core::cell::RefCell
@@ -199,7 +208,7 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 ///
 /// Sharing a mutable [`AtomicUsize`]:
 ///
-/// [`AtomicUsize`]: core::sync::ShareUsize "sync::ShareUsize"
+/// [`AtomicUsize`]: core::sync::atomic::AtomicUsize "sync::atomic::AtomicUsize"
 ///
 /// ```no_run
 /// use pi_share::xrc::Xrc;
@@ -222,26 +231,40 @@ const INTERNAL_OVERFLOW_ERROR: &str = "Xrc counter overflow";
 /// counting in general.
 ///
 /// [rc_examples]: crate::rc#examples
-pub struct Xrc<T: ?Sized> {
+pub struct Xrc<
+    T: ?Sized,
+    A: Allocator = Global,
+> {
     ptr: NonNull<XrcInner<T>>,
     phantom: PhantomData<XrcInner<T>>,
+    alloc: A,
 }
 
-unsafe impl<T: ?Sized + Sync + Send> Send for Xrc<T> {}
-unsafe impl<T: ?Sized + Sync + Send> Sync for Xrc<T> {}
+unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Send> Send for Xrc<T, A> {}
+unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Sync> Sync for Xrc<T, A> {}
 
-impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Xrc<T> {}
+impl<T: RefUnwindSafe + ?Sized, A: Allocator + UnwindSafe> UnwindSafe for Xrc<T, A> {}
+
 
 impl<T: ?Sized> Xrc<T> {
     unsafe fn from_inner(ptr: NonNull<XrcInner<T>>) -> Self {
-        Self {
-            ptr,
-            phantom: PhantomData,
-        }
+        unsafe { Self::from_inner_in(ptr, Global) }
     }
 
     unsafe fn from_ptr(ptr: *mut XrcInner<T>) -> Self {
-        unsafe { Self::from_inner(NonNull::new_unchecked(ptr)) }
+        unsafe { Self::from_ptr_in(ptr, Global) }
+    }
+}
+
+impl<T: ?Sized, A: Allocator> Xrc<T, A> {
+    #[inline]
+    unsafe fn from_inner_in(ptr: NonNull<XrcInner<T>>, alloc: A) -> Self {
+        Self { ptr, phantom: PhantomData, alloc }
+    }
+
+    #[inline]
+    unsafe fn from_ptr_in(ptr: *mut XrcInner<T>, alloc: A) -> Self {
+        unsafe { Self::from_inner_in(NonNull::new_unchecked(ptr), alloc) }
     }
 }
 
@@ -265,7 +288,10 @@ impl<T: ?Sized> Xrc<T> {
 /// The typical way to obtain a `Weak` pointer is to call [`Xrc::downgrade`].
 ///
 /// [`upgrade`]: Weak::upgrade
-pub struct Weak<T: ?Sized> {
+pub struct Weak<
+    T: ?Sized,
+    A: Allocator = Global,
+> {
     // This is a `NonNull` to allow optimizing the size of this type in enums,
     // but it is not necessarily a valid pointer.
     // `Weak::new` sets this to `usize::MAX` so that it doesn’t need
@@ -273,10 +299,11 @@ pub struct Weak<T: ?Sized> {
     // will ever have because RcBox has alignment at least 2.
     // This is only possible when `T: Sized`; unsized `T` never dangle.
     ptr: NonNull<XrcInner<T>>,
+    alloc: A,
 }
 
-unsafe impl<T: ?Sized + Sync + Send> Send for Weak<T> {}
-unsafe impl<T: ?Sized + Sync + Send> Sync for Weak<T> {}
+unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Send> Send for Weak<T, A> {}
+unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Sync> Sync for Weak<T, A> {}
 
 impl<T: ?Sized> fmt::Debug for Weak<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -305,11 +332,7 @@ fn xrcinner_layout_for_value_layout(layout: Layout) -> Layout {
     // Previously, layout was calculated on the expression
     // `&*(ptr as *const XrcInner<T>)`, but this created a misaligned
     // reference (see #54908).
-    Layout::new::<XrcInner<()>>()
-        .extend(layout)
-        .unwrap()
-        .0
-        .pad_to_align()
+    Layout::new::<XrcInner<()>>().extend(layout).unwrap().0.pad_to_align()
 }
 
 unsafe impl<T: ?Sized + Sync + Send> Send for XrcInner<T> {}
@@ -365,7 +388,7 @@ impl<T> Xrc<T> {
     ///
     /// ```
     /// # #![allow(dead_code)]
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// struct Gadget {
     ///     me: Weak<Gadget>,
@@ -397,16 +420,15 @@ impl<T> Xrc<T> {
     {
         // Construct the inner in the "uninitialized" state with a single
         // weak reference.
-
         let uninit_ptr: NonNull<_> = Box::leak(Box::new(XrcInner {
             strong: ShareUsize::new(0),
             weak: ShareUsize::new(1),
-            data: MaybeUninit::<T>::uninit(),
+            data: mem::MaybeUninit::<T>::uninit(),
         }))
         .into();
         let init_ptr: NonNull<XrcInner<T>> = uninit_ptr.cast();
 
-        let weak = Weak { ptr: init_ptr };
+        let weak = Weak { ptr: init_ptr, alloc: Global };
 
         // It's important we don't give up ownership of the weak pointer, or
         // else the memory might be freed by the time `data_fn` returns. If
@@ -442,7 +464,7 @@ impl<T> Xrc<T> {
 
         // Strong references should collectively own a shared weak reference,
         // so don't run the destructor for our old weak reference.
-        forget(weak);
+        mem::forget(weak);
         strong
     }
 
@@ -466,13 +488,14 @@ impl<T> Xrc<T> {
     /// assert_eq!(*five, 5)
     /// ```
     #[cfg(not(no_global_oom_handling))]
+    #[inline]
     #[must_use]
-    pub fn new_uninit() -> Xrc<MaybeUninit<T>> {
+    pub fn new_uninit() -> Xrc<mem::MaybeUninit<T>> {
         unsafe {
             Xrc::from_ptr(Xrc::allocate_for_layout(
                 Layout::new::<T>(),
                 |layout| Global.allocate(layout),
-                |mem| mem as *mut XrcInner<MaybeUninit<T>>,
+                <*mut u8>::cast,
             ))
         }
     }
@@ -496,15 +519,16 @@ impl<T> Xrc<T> {
     /// assert_eq!(*zero, 0)
     /// ```
     ///
-    /// [zeroed]: MaybeUninit::zeroed
+    /// [zeroed]: mem::MaybeUninit::zeroed
     #[cfg(not(no_global_oom_handling))]
+    #[inline]
     #[must_use]
-    pub fn new_zeroed() -> Xrc<MaybeUninit<T>> {
+    pub fn new_zeroed() -> Xrc<mem::MaybeUninit<T>> {
         unsafe {
             Xrc::from_ptr(Xrc::allocate_for_layout(
                 Layout::new::<T>(),
                 |layout| Global.allocate_zeroed(layout),
-                |mem| mem as *mut XrcInner<MaybeUninit<T>>,
+                <*mut u8>::cast,
             ))
         }
     }
@@ -568,12 +592,12 @@ impl<T> Xrc<T> {
     /// # Ok::<(), std::alloc::AllocError>(())
     /// ```
     // #[unstable(feature = "new_uninit", issue = "63291")]
-    pub fn try_new_uninit() -> Result<Xrc<MaybeUninit<T>>, AllocError> {
+    pub fn try_new_uninit() -> Result<Xrc<mem::MaybeUninit<T>>, AllocError> {
         unsafe {
             Ok(Xrc::from_ptr(Xrc::try_allocate_for_layout(
                 Layout::new::<T>(),
                 |layout| Global.allocate(layout),
-                |mem| mem as *mut XrcInner<MaybeUninit<T>>,
+                <*mut u8>::cast,
             )?))
         }
     }
@@ -598,15 +622,258 @@ impl<T> Xrc<T> {
     /// # Ok::<(), std::alloc::AllocError>(())
     /// ```
     ///
-    /// [zeroed]: MaybeUninit::zeroed
+    /// [zeroed]: mem::MaybeUninit::zeroed
     // #[unstable(feature = "new_uninit", issue = "63291")]
-    pub fn try_new_zeroed() -> Result<Xrc<MaybeUninit<T>>, AllocError> {
+    pub fn try_new_zeroed() -> Result<Xrc<mem::MaybeUninit<T>>, AllocError> {
         unsafe {
             Ok(Xrc::from_ptr(Xrc::try_allocate_for_layout(
                 Layout::new::<T>(),
                 |layout| Global.allocate_zeroed(layout),
-                |mem| mem as *mut XrcInner<MaybeUninit<T>>,
+                <*mut u8>::cast,
             )?))
+        }
+    }
+}
+
+impl<T, A: Allocator> Xrc<T, A> {
+    /// Returns a reference to the underlying allocator.
+    ///
+    /// Note: this is an associated function, which means that you have
+    /// to call it as `Xrc::allocator(&a)` instead of `a.allocator()`. This
+    /// is so that there is no conflict with a method on the inner type.
+    #[inline]
+    pub fn allocator(this: &Self) -> &A {
+        &this.alloc
+    }
+    /// Constructs a new `Xrc<T>` in the provided allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let five = Xrc::new_in(5, System);
+    /// ```
+    #[inline]
+    #[cfg(not(no_global_oom_handling))]
+    pub fn new_in(data: T, alloc: A) -> Xrc<T, A> {
+        // Start the weak pointer count as 1 which is the weak pointer that's
+        // held by all the strong pointers (kinda), see std/rc.rs for more info
+        let x = Box::new_in(
+            XrcInner {
+                strong: ShareUsize::new(1),
+                weak: ShareUsize::new(1),
+                data,
+            },
+            alloc,
+        );
+        let (ptr, alloc) = Self::box_into_unique(x);
+        unsafe { Self::from_inner_in(ptr, alloc) }
+    }
+
+    /// Constructs a new `Xrc` with uninitialized contents in the provided allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    /// #![feature(get_mut_unchecked)]
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let mut five = Xrc::<u32, _>::new_uninit_in(System);
+    ///
+    /// let five = unsafe {
+    ///     // Deferred initialization:
+    ///     Xrc::get_mut_unchecked(&mut five).as_mut_ptr().write(5);
+    ///
+    ///     five.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*five, 5)
+    /// ```
+    #[cfg(not(no_global_oom_handling))]
+    // #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub fn new_uninit_in(alloc: A) -> Xrc<mem::MaybeUninit<T>, A> {
+        unsafe {
+            Xrc::from_ptr_in(
+                Xrc::allocate_for_layout(
+                    Layout::new::<T>(),
+                    |layout| alloc.allocate(layout),
+                    <*mut u8>::cast,
+                ),
+                alloc,
+            )
+        }
+    }
+
+    /// Constructs a new `Xrc` with uninitialized contents, with the memory
+    /// being filled with `0` bytes, in the provided allocator.
+    ///
+    /// See [`MaybeUninit::zeroed`][zeroed] for examples of correct and incorrect usage
+    /// of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let zero = Xrc::<u32, _>::new_zeroed_in(System);
+    /// let zero = unsafe { zero.assume_init() };
+    ///
+    /// assert_eq!(*zero, 0)
+    /// ```
+    ///
+    /// [zeroed]: mem::MaybeUninit::zeroed
+    #[cfg(not(no_global_oom_handling))]
+    // #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub fn new_zeroed_in(alloc: A) -> Xrc<mem::MaybeUninit<T>, A> {
+        unsafe {
+            Xrc::from_ptr_in(
+                Xrc::allocate_for_layout(
+                    Layout::new::<T>(),
+                    |layout| alloc.allocate_zeroed(layout),
+                    <*mut u8>::cast,
+                ),
+                alloc,
+            )
+        }
+    }
+
+    /// Constructs a new `Pin<Xrc<T, A>>` in the provided allocator. If `T` does not implement `Unpin`,
+    /// then `data` will be pinned in memory and unable to be moved.
+    #[cfg(not(no_global_oom_handling))]
+    #[inline]
+    pub fn pin_in(data: T, alloc: A) -> Pin<Xrc<T, A>> {
+        unsafe { Pin::new_unchecked(Xrc::new_in(data, alloc)) }
+    }
+
+    /// Constructs a new `Pin<Xrc<T, A>>` in the provided allocator, return an error if allocation
+    /// fails.
+    #[inline]
+    pub fn try_pin_in(data: T, alloc: A) -> Result<Pin<Xrc<T, A>>, AllocError> {
+        unsafe { Ok(Pin::new_unchecked(Xrc::try_new_in(data, alloc)?)) }
+    }
+
+    /// Constructs a new `Xrc<T, A>` in the provided allocator, returning an error if allocation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let five = Xrc::try_new_in(5, System)?;
+    /// # Ok::<(), std::alloc::AllocError>(())
+    /// ```
+    #[inline]
+    pub fn try_new_in(data: T, alloc: A) -> Result<Xrc<T, A>, AllocError> {
+        // Start the weak pointer count as 1 which is the weak pointer that's
+        // held by all the strong pointers (kinda), see std/rc.rs for more info
+        let x = Box::try_new_in(
+            XrcInner {
+                strong: ShareUsize::new(1),
+                weak: ShareUsize::new(1),
+                data,
+            },
+            alloc,
+        )?;
+        let (ptr, alloc) = Self::box_into_unique(x);
+        Ok(unsafe { Self::from_inner_in(ptr, alloc) })
+    }
+    #[inline]
+    fn box_into_unique(x: Box<XrcInner<T>, A>) -> (NonNull<XrcInner<T>>, A){
+        let alloc = unsafe { ptr::read(Box::<XrcInner<T>, A>::allocator(&x))};
+        let t = Box::leak(x);
+        (NonNull::from(t), alloc)
+    }
+    /// Constructs a new `Xrc` with uninitialized contents, in the provided allocator, returning an
+    /// error if allocation fails.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit, allocator_api)]
+    /// #![feature(get_mut_unchecked)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let mut five = Xrc::<u32, _>::try_new_uninit_in(System)?;
+    ///
+    /// let five = unsafe {
+    ///     // Deferred initialization:
+    ///     Xrc::get_mut_unchecked(&mut five).as_mut_ptr().write(5);
+    ///
+    ///     five.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*five, 5);
+    /// # Ok::<(), std::alloc::AllocError>(())
+    /// ```
+    // #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub fn try_new_uninit_in(alloc: A) -> Result<Xrc<mem::MaybeUninit<T>, A>, AllocError> {
+        unsafe {
+            Ok(Xrc::from_ptr_in(
+                Xrc::try_allocate_for_layout(
+                    Layout::new::<T>(),
+                    |layout| alloc.allocate(layout),
+                    <*mut u8>::cast,
+                )?,
+                alloc,
+            ))
+        }
+    }
+
+    /// Constructs a new `Xrc` with uninitialized contents, with the memory
+    /// being filled with `0` bytes, in the provided allocator, returning an error if allocation
+    /// fails.
+    ///
+    /// See [`MaybeUninit::zeroed`][zeroed] for examples of correct and incorrect usage
+    /// of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit, allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let zero = Xrc::<u32, _>::try_new_zeroed_in(System)?;
+    /// let zero = unsafe { zero.assume_init() };
+    ///
+    /// assert_eq!(*zero, 0);
+    /// # Ok::<(), std::alloc::AllocError>(())
+    /// ```
+    ///
+    /// [zeroed]: mem::MaybeUninit::zeroed
+    // #[unstable(feature = "new_uninit", issue = "63291")]
+    #[inline]
+    pub fn try_new_zeroed_in(alloc: A) -> Result<Xrc<mem::MaybeUninit<T>, A>, AllocError> {
+        unsafe {
+            Ok(Xrc::from_ptr_in(
+                Xrc::try_allocate_for_layout(
+                    Layout::new::<T>(),
+                    |layout| alloc.allocate_zeroed(layout),
+                    <*mut u8>::cast,
+                )?,
+                alloc,
+            ))
         }
     }
     /// Returns the inner value, if the `Xrc` has exactly one strong reference.
@@ -641,23 +908,19 @@ impl<T> Xrc<T> {
     /// ```
     #[inline]
     pub fn try_unwrap(this: Self) -> Result<T, Self> {
-        if this
-            .inner()
-            .strong
-            .compare_exchange(1, 0, Relaxed, Relaxed)
-            .is_err()
-        {
+        if this.inner().strong.compare_exchange(1, 0, Relaxed, Relaxed).is_err() {
             return Err(this);
         }
 
-        this.inner().strong.load(Acquire);
+        acquire!(this.inner().strong);
 
         unsafe {
             let elem = ptr::read(&this.ptr.as_ref().data);
+            let alloc = ptr::read(&this.alloc); // copy the allocator
 
             // Make a weak pointer to clean up the implicit strong-weak reference
-            let _weak = Weak { ptr: this.ptr };
-            forget(this);
+            let _weak = Weak { ptr: this.ptr, alloc };
+            mem::forget(this);
 
             Ok(elem)
         }
@@ -717,8 +980,8 @@ impl<T> Xrc<T> {
     /// impl<T> Drop for LinkedList<T> {
     ///     fn drop(&mut self) {
     ///         let mut link = self.0.take();
-    ///         while let Some(Xrc_node) = link.take() {
-    ///             if let Some(Node(_value, next)) = Xrc::into_inner(Xrc_node) {
+    ///         while let Some(xrc_node) = link.take() {
+    ///             if let Some(Node(_value, next)) = Xrc::into_inner(xrc_node) {
     ///                 link = next;
     ///             }
     ///         }
@@ -738,7 +1001,7 @@ impl<T> Xrc<T> {
     ///
     /// // The following code could have still caused a stack overflow
     /// // despite the manual `Drop` impl if that `Drop` impl had used
-    /// // `Xrc::try_unwrap(Xrc).ok()` instead of `Xrc::into_inner(Xrc)`.
+    /// // `Xrc::try_unwrap(xrc).ok()` instead of `Xrc::into_inner(xrc)`.
     ///
     /// // Create a long list and clone it
     /// let mut x = LinkedList::new();
@@ -756,14 +1019,14 @@ impl<T> Xrc<T> {
     #[inline]
     pub fn into_inner(this: Self) -> Option<T> {
         // Make sure that the ordinary `Drop` implementation isn’t called as well
-        let mut this = ManuallyDrop::new(this);
+        let mut this = mem::ManuallyDrop::new(this);
 
         // Following the implementation of `drop` and `drop_slow`
         if this.inner().strong.fetch_sub(1, Release) != 1 {
             return None;
         }
 
-        this.inner().strong.load(Acquire);
+        acquire!(this.inner().strong);
 
         // SAFETY: This mirrors the line
         //
@@ -772,9 +1035,11 @@ impl<T> Xrc<T> {
         // in `drop_slow`. Instead of dropping the value behind the pointer,
         // it is read and eventually returned; `ptr::read` has the same
         // safety conditions as `ptr::drop_in_place`.
-        let inner = unsafe { ptr::read(Self::get_mut_unchecked(&mut this)) };
 
-        drop(Weak { ptr: this.ptr });
+        let inner = unsafe { ptr::read(Self::get_mut_unchecked(&mut this)) };
+        let alloc = unsafe { ptr::read(&this.alloc) };
+
+        drop(Weak { ptr: this.ptr, alloc });
 
         Some(inner)
     }
@@ -804,8 +1069,9 @@ impl<T> Xrc<[T]> {
     /// assert_eq!(*values, [1, 2, 3])
     /// ```
     #[cfg(not(no_global_oom_handling))]
+    #[inline]
     #[must_use]
-    pub fn new_uninit_slice(len: usize) -> Xrc<[MaybeUninit<T>]> {
+    pub fn new_uninit_slice(len: usize) -> Xrc<[mem::MaybeUninit<T>]> {
         unsafe { Xrc::from_ptr(Xrc::allocate_for_slice(len)) }
     }
 
@@ -828,24 +1094,99 @@ impl<T> Xrc<[T]> {
     /// assert_eq!(*values, [0, 0, 0])
     /// ```
     ///
-    /// [zeroed]: MaybeUninit::zeroed
+    /// [zeroed]: mem::MaybeUninit::zeroed
     #[cfg(not(no_global_oom_handling))]
+    #[inline]
     #[must_use]
-    pub fn new_zeroed_slice(len: usize) -> Xrc<[MaybeUninit<T>]> {
+    pub fn new_zeroed_slice(len: usize) -> Xrc<[mem::MaybeUninit<T>]> {
         unsafe {
             Xrc::from_ptr(Xrc::allocate_for_layout(
                 Layout::array::<T>(len).unwrap(),
                 |layout| Global.allocate_zeroed(layout),
                 |mem| {
                     ptr::slice_from_raw_parts_mut(mem as *mut T, len)
-                        as *mut XrcInner<[MaybeUninit<T>]>
+                        as *mut XrcInner<[mem::MaybeUninit<T>]>
                 },
             ))
         }
     }
 }
 
-impl<T> Xrc<MaybeUninit<T>> {
+impl<T, A: Allocator> Xrc<[T], A> {
+    /// Constructs a new atomically reference-counted slice with uninitialized contents in the
+    /// provided allocator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    /// #![feature(get_mut_unchecked)]
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let mut values = Xrc::<[u32], _>::new_uninit_slice_in(3, System);
+    ///
+    /// let values = unsafe {
+    ///     // Deferred initialization:
+    ///     Xrc::get_mut_unchecked(&mut values)[0].as_mut_ptr().write(1);
+    ///     Xrc::get_mut_unchecked(&mut values)[1].as_mut_ptr().write(2);
+    ///     Xrc::get_mut_unchecked(&mut values)[2].as_mut_ptr().write(3);
+    ///
+    ///     values.assume_init()
+    /// };
+    ///
+    /// assert_eq!(*values, [1, 2, 3])
+    /// ```
+    #[cfg(not(no_global_oom_handling))]
+    #[inline]
+    pub fn new_uninit_slice_in(len: usize, alloc: A) -> Xrc<[mem::MaybeUninit<T>], A> {
+        unsafe { Xrc::from_ptr_in(Xrc::allocate_for_slice_in(len, &alloc), alloc) }
+    }
+
+    /// Constructs a new atomically reference-counted slice with uninitialized contents, with the memory being
+    /// filled with `0` bytes, in the provided allocator.
+    ///
+    /// See [`MaybeUninit::zeroed`][zeroed] for examples of correct and
+    /// incorrect usage of this method.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(new_uninit)]
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let values = Xrc::<[u32], _>::new_zeroed_slice_in(3, System);
+    /// let values = unsafe { values.assume_init() };
+    ///
+    /// assert_eq!(*values, [0, 0, 0])
+    /// ```
+    ///
+    /// [zeroed]: mem::MaybeUninit::zeroed
+    #[cfg(not(no_global_oom_handling))]
+    #[inline]
+    pub fn new_zeroed_slice_in(len: usize, alloc: A) -> Xrc<[mem::MaybeUninit<T>], A> {
+        unsafe {
+            Xrc::from_ptr_in(
+                Xrc::allocate_for_layout(
+                    Layout::array::<T>(len).unwrap(),
+                    |layout| alloc.allocate_zeroed(layout),
+                    |mem| {
+                        ptr::slice_from_raw_parts_mut(mem.cast::<T>(), len)
+                            as *mut XrcInner<[mem::MaybeUninit<T>]>
+                    },
+                ),
+                alloc,
+            )
+        }
+    }
+}
+
+impl<T, A: Allocator> Xrc<mem::MaybeUninit<T>, A> {
     /// Converts to `Xrc<T>`.
     ///
     /// # Safety
@@ -856,7 +1197,7 @@ impl<T> Xrc<MaybeUninit<T>> {
     /// Calling this when the content is not yet fully initialized
     /// causes immediate undefined behavior.
     ///
-    /// [`MaybeUninit::assume_init`]: MaybeUninit::assume_init
+    /// [`MaybeUninit::assume_init`]: mem::MaybeUninit::assume_init
     ///
     /// # Examples
     ///
@@ -877,12 +1218,16 @@ impl<T> Xrc<MaybeUninit<T>> {
     /// ```
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
-    pub unsafe fn assume_init(self) -> Xrc<T> {
-        unsafe { Xrc::from_inner(ManuallyDrop::new(self).ptr.cast()) }
+    pub unsafe fn assume_init(self) -> Xrc<T, A>
+    where
+        A: Clone,
+    {
+        let md_self = mem::ManuallyDrop::new(self);
+        unsafe { Xrc::from_inner_in(md_self.ptr.cast(), md_self.alloc.clone()) }
     }
 }
 
-impl<T> Xrc<[MaybeUninit<T>]> {
+impl<T, A: Allocator> Xrc<[mem::MaybeUninit<T>], A> {
     /// Converts to `Xrc<[T]>`.
     ///
     /// # Safety
@@ -893,7 +1238,7 @@ impl<T> Xrc<[MaybeUninit<T>]> {
     /// Calling this when the content is not yet fully initialized
     /// causes immediate undefined behavior.
     ///
-    /// [`MaybeUninit::assume_init`]: MaybeUninit::assume_init
+    /// [`MaybeUninit::assume_init`]: mem::MaybeUninit::assume_init
     ///
     /// # Examples
     ///
@@ -917,59 +1262,16 @@ impl<T> Xrc<[MaybeUninit<T>]> {
     /// ```
     #[must_use = "`self` will be dropped if the result is not used"]
     #[inline]
-    pub unsafe fn assume_init(self) -> Xrc<[T]> {
-        unsafe { Xrc::from_ptr(ManuallyDrop::new(self).ptr.as_ptr() as _) }
+    pub unsafe fn assume_init(self) -> Xrc<[T], A>
+    where
+        A: Clone,
+    {
+        let md_self = mem::ManuallyDrop::new(self);
+        unsafe { Xrc::from_ptr_in(md_self.ptr.as_ptr() as _, md_self.alloc.clone()) }
     }
 }
 
 impl<T: ?Sized> Xrc<T> {
-    /// Consumes the `Xrc`, returning the wrapped pointer.
-    ///
-    /// To avoid a memory leak the pointer must be converted back to an `Xrc` using
-    /// [`Xrc::from_raw`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pi_share::xrc::Xrc;
-    ///
-    /// let x = Xrc::new("hello".to_owned());
-    /// let x_ptr = Xrc::into_raw(x);
-    /// assert_eq!(unsafe { &*x_ptr }, "hello");
-    /// ```
-    #[must_use = "losing the pointer will leak memory"]
-    pub fn into_raw(this: Self) -> *const T {
-        let ptr = Self::as_ptr(&this);
-        forget(this);
-        ptr
-    }
-
-    /// Provides a raw pointer to the data.
-    ///
-    /// The counts are not affected in any way and the `Xrc` is not consumed. The pointer is valid for
-    /// as long as there are strong counts in the `Xrc`.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pi_share::xrc::Xrc;
-    ///
-    /// let x = Xrc::new("hello".to_owned());
-    /// let y = Xrc::clone(&x);
-    /// let x_ptr = Xrc::as_ptr(&x);
-    /// assert_eq!(x_ptr, Xrc::as_ptr(&y));
-    /// assert_eq!(unsafe { &*x_ptr }, "hello");
-    /// ```
-    #[must_use]
-    pub fn as_ptr(this: &Self) -> *const T {
-        let ptr: *mut XrcInner<T> = NonNull::as_ptr(this.ptr);
-
-        // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
-        // this is required to retain raw/mut provenance such that e.g. `get_mut` can
-        // write through the pointer after the Rc is recovered through `from_raw`.
-        unsafe { ptr::addr_of_mut!((*ptr).data) }
-    }
-
     /// Constructs an `Xrc<T>` from a raw pointer.
     ///
     /// The raw pointer must have been previously returned by a call to
@@ -1007,125 +1309,9 @@ impl<T: ?Sized> Xrc<T> {
     ///
     /// // The memory was freed when `x` went out of scope above, so `x_ptr` is now dangling!
     /// ```
+    #[inline]
     pub unsafe fn from_raw(ptr: *const T) -> Self {
-        unsafe {
-            let offset = data_offset(ptr);
-
-            // Reverse the offset to find the original XrcInner.
-            let xrc_ptr = ptr.byte_sub(offset) as *mut XrcInner<T>;
-
-            Self::from_ptr(xrc_ptr)
-        }
-    }
-
-    /// Creates a new [`Weak`] pointer to this allocation.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pi_share::xrc::Xrc;
-    ///
-    /// let five = Xrc::new(5);
-    ///
-    /// let weak_five = Xrc::downgrade(&five);
-    /// ```
-    #[must_use = "this returns a new `Weak` pointer, \
-                  without modifying the original `Xrc`"]
-    pub fn downgrade(this: &Self) -> Weak<T> {
-        // This Relaxed is OK because we're checking the value in the CAS
-        // below.
-        let mut cur = this.inner().weak.load(Relaxed);
-
-        loop {
-            // check if the weak counter is currently "locked"; if so, spin.
-            if cur == usize::MAX {
-                hint::spin_loop();
-                cur = this.inner().weak.load(Relaxed);
-                continue;
-            }
-
-            // We can't allow the refcount to increase much past `MAX_REFCOUNT`.
-            assert!(cur <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
-
-            // NOTE: this code currently ignores the possibility of overflow
-            // into usize::MAX; in general both Rc and Xrc need to be adjusted
-            // to deal with overflow.
-
-            // Unlike with Clone(), we need this to be an Acquire read to
-            // synchronize with the write coming from `is_unique`, so that the
-            // events prior to that write happen before this read.
-            match this
-                .inner()
-                .weak
-                .compare_exchange_weak(cur, cur + 1, Acquire, Relaxed)
-            {
-                Ok(_) => {
-                    // Make sure we do not create a dangling Weak
-                    debug_assert!(!is_dangling(this.ptr.as_ptr()));
-                    return Weak { ptr: this.ptr };
-                }
-                Err(old) => cur = old,
-            }
-        }
-    }
-
-    /// Gets the number of [`Weak`] pointers to this allocation.
-    ///
-    /// # Safety
-    ///
-    /// This method by itself is safe, but using it correctly requires extra care.
-    /// Another thread can change the weak count at any time,
-    /// including potentially between calling this method and acting on the result.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pi_share::xrc::Xrc;
-    ///
-    /// let five = Xrc::new(5);
-    /// let _weak_five = Xrc::downgrade(&five);
-    ///
-    /// // This assertion is deterministic because we haven't shared
-    /// // the `Xrc` or `Weak` between threads.
-    /// assert_eq!(1, Xrc::weak_count(&five));
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn weak_count(this: &Self) -> usize {
-        let cnt = this.inner().weak.load(Acquire);
-        // If the weak count is currently locked, the value of the
-        // count was 0 just before taking the lock.
-        if cnt == usize::MAX {
-            0
-        } else {
-            cnt - 1
-        }
-    }
-
-    /// Gets the number of strong (`Xrc`) pointers to this allocation.
-    ///
-    /// # Safety
-    ///
-    /// This method by itself is safe, but using it correctly requires extra care.
-    /// Another thread can change the strong count at any time,
-    /// including potentially between calling this method and acting on the result.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use pi_share::xrc::Xrc;
-    ///
-    /// let five = Xrc::new(5);
-    /// let _also_five = Xrc::clone(&five);
-    ///
-    /// // This assertion is deterministic because we haven't shared
-    /// // the `Xrc` between threads.
-    /// assert_eq!(2, Xrc::strong_count(&five));
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn strong_count(this: &Self) -> usize {
-        this.inner().strong.load(Acquire)
+        unsafe { Xrc::from_raw_in(ptr, Global) }
     }
 
     /// Increments the strong reference count on the `Xrc<T>` associated with the
@@ -1156,10 +1342,7 @@ impl<T: ?Sized> Xrc<T> {
     /// ```
     #[inline]
     pub unsafe fn increment_strong_count(ptr: *const T) {
-        // Retain Xrc, but don't touch refcount by wrapping in ManuallyDrop
-        let xrc = unsafe { ManuallyDrop::new(Xrc::<T>::from_raw(ptr)) };
-        // Now increase refcount, but don't drop new refcount either
-        let _xrc_clone: ManuallyDrop<_> = xrc.clone();
+        unsafe { Xrc::increment_strong_count_in(ptr, Global) }
     }
 
     /// Decrements the strong reference count on the `Xrc<T>` associated with the
@@ -1194,12 +1377,299 @@ impl<T: ?Sized> Xrc<T> {
     /// ```
     #[inline]
     pub unsafe fn decrement_strong_count(ptr: *const T) {
-        unsafe { drop(Xrc::from_raw(ptr)) };
+        unsafe { Xrc::decrement_strong_count_in(ptr, Global) }
+    }
+}
+
+impl<T: ?Sized, A: Allocator> Xrc<T, A> {
+    /// Consumes the `Xrc`, returning the wrapped pointer.
+    ///
+    /// To avoid a memory leak the pointer must be converted back to an `Xrc` using
+    /// [`Xrc::from_raw`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_share::xrc::Xrc;
+    ///
+    /// let x = Xrc::new("hello".to_owned());
+    /// let x_ptr = Xrc::into_raw(x);
+    /// assert_eq!(unsafe { &*x_ptr }, "hello");
+    /// ```
+    #[must_use = "losing the pointer will leak memory"]
+    pub fn into_raw(this: Self) -> *const T {
+        let ptr = Self::as_ptr(&this);
+        mem::forget(this);
+        ptr
+    }
+
+    /// Provides a raw pointer to the data.
+    ///
+    /// The counts are not affected in any way and the `Xrc` is not consumed. The pointer is valid for
+    /// as long as there are strong counts in the `Xrc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_share::xrc::Xrc;
+    ///
+    /// let x = Xrc::new("hello".to_owned());
+    /// let y = Xrc::clone(&x);
+    /// let x_ptr = Xrc::as_ptr(&x);
+    /// assert_eq!(x_ptr, Xrc::as_ptr(&y));
+    /// assert_eq!(unsafe { &*x_ptr }, "hello");
+    /// ```
+    #[must_use]
+    pub fn as_ptr(this: &Self) -> *const T {
+        let ptr: *mut XrcInner<T> = NonNull::as_ptr(this.ptr);
+
+        // SAFETY: This cannot go through Deref::deref or RcBoxPtr::inner because
+        // this is required to retain raw/mut provenance such that e.g. `get_mut` can
+        // write through the pointer after the Rc is recovered through `from_raw`.
+        unsafe { ptr::addr_of_mut!((*ptr).data) }
+    }
+
+    /// Constructs an `Xrc<T, A>` from a raw pointer.
+    ///
+    /// The raw pointer must have been previously returned by a call to
+    /// [`Xrc<U, A>::into_raw`][into_raw] where `U` must have the same size and
+    /// alignment as `T`. This is trivially true if `U` is `T`.
+    /// Note that if `U` is not `T` but has the same size and alignment, this is
+    /// basically like transmuting references of different types. See
+    /// [`mem::transmute`] for more information on what
+    /// restrictions apply in this case.
+    ///
+    /// The raw pointer must point to a block of memory allocated by `alloc`
+    ///
+    /// The user of `from_raw` has to make sure a specific value of `T` is only
+    /// dropped once.
+    ///
+    /// This function is unsafe because improper use may lead to memory unsafety,
+    /// even if the returned `Xrc<T>` is never accessed.
+    ///
+    /// [into_raw]: Xrc::into_raw
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let x = Xrc::new_in("hello".to_owned(), System);
+    /// let x_ptr = Xrc::into_raw(x);
+    ///
+    /// unsafe {
+    ///     // Convert back to an `Xrc` to prevent leak.
+    ///     let x = Xrc::from_raw_in(x_ptr, System);
+    ///     assert_eq!(&*x, "hello");
+    ///
+    ///     // Further calls to `Xrc::from_raw(x_ptr)` would be memory-unsafe.
+    /// }
+    ///
+    /// // The memory was freed when `x` went out of scope above, so `x_ptr` is now dangling!
+    /// ```
+    #[inline]
+    pub unsafe fn from_raw_in(ptr: *const T, alloc: A) -> Self {
+        unsafe {
+            let offset = data_offset(ptr);
+
+            // Reverse the offset to find the original XrcInner.
+            let xrc_ptr = ptr.byte_sub(offset) as *mut XrcInner<T>;
+
+            Self::from_ptr_in(xrc_ptr, alloc)
+        }
+    }
+
+    /// Creates a new [`Weak`] pointer to this allocation.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_share::xrc::Xrc;
+    ///
+    /// let five = Xrc::new(5);
+    ///
+    /// let weak_five = Xrc::downgrade(&five);
+    /// ```
+    #[must_use = "this returns a new `Weak` pointer, \
+                  without modifying the original `Xrc`"]
+    pub fn downgrade(this: &Self) -> Weak<T, A>
+    where
+        A: Clone,
+    {
+        // This Relaxed is OK because we're checking the value in the CAS
+        // below.
+        let mut cur = this.inner().weak.load(Relaxed);
+
+        loop {
+            // check if the weak counter is currently "locked"; if so, spin.
+            if cur == usize::MAX {
+                hint::spin_loop();
+                cur = this.inner().weak.load(Relaxed);
+                continue;
+            }
+
+            // We can't allow the refcount to increase much past `MAX_REFCOUNT`.
+            assert!(cur <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
+
+            // NOTE: this code currently ignores the possibility of overflow
+            // into usize::MAX; in general both Rc and Xrc need to be adjusted
+            // to deal with overflow.
+
+            // Unlike with Clone(), we need this to be an Acquire read to
+            // synchronize with the write coming from `is_unique`, so that the
+            // events prior to that write happen before this read.
+            match this.inner().weak.compare_exchange_weak(cur, cur + 1, Acquire, Relaxed) {
+                Ok(_) => {
+                    // Make sure we do not create a dangling Weak
+                    debug_assert!(!is_dangling(this.ptr.as_ptr()));
+                    return Weak { ptr: this.ptr, alloc: this.alloc.clone() };
+                }
+                Err(old) => cur = old,
+            }
+        }
+    }
+
+    /// Gets the number of [`Weak`] pointers to this allocation.
+    ///
+    /// # Safety
+    ///
+    /// This method by itself is safe, but using it correctly requires extra care.
+    /// Another thread can change the weak count at any time,
+    /// including potentially between calling this method and acting on the result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_share::xrc::Xrc;
+    ///
+    /// let five = Xrc::new(5);
+    /// let _weak_five = Xrc::downgrade(&five);
+    ///
+    /// // This assertion is deterministic because we haven't shared
+    /// // the `Xrc` or `Weak` between threads.
+    /// assert_eq!(1, Xrc::weak_count(&five));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn weak_count(this: &Self) -> usize {
+        let cnt = this.inner().weak.load(Relaxed);
+        // If the weak count is currently locked, the value of the
+        // count was 0 just before taking the lock.
+        if cnt == usize::MAX { 0 } else { cnt - 1 }
+    }
+
+    /// Gets the number of strong (`Xrc`) pointers to this allocation.
+    ///
+    /// # Safety
+    ///
+    /// This method by itself is safe, but using it correctly requires extra care.
+    /// Another thread can change the strong count at any time,
+    /// including potentially between calling this method and acting on the result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pi_share::xrc::Xrc;
+    ///
+    /// let five = Xrc::new(5);
+    /// let _also_five = Xrc::clone(&five);
+    ///
+    /// // This assertion is deterministic because we haven't shared
+    /// // the `Xrc` between threads.
+    /// assert_eq!(2, Xrc::strong_count(&five));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn strong_count(this: &Self) -> usize {
+        this.inner().strong.load(Relaxed)
+    }
+
+    /// Increments the strong reference count on the `Xrc<T>` associated with the
+    /// provided pointer by one.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must have been obtained through `Xrc::into_raw`, and the
+    /// associated `Xrc` instance must be valid (i.e. the strong count must be at
+    /// least 1) for the duration of this method,, and `ptr` must point to a block of memory
+    /// allocated by `alloc`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let five = Xrc::new_in(5, System);
+    ///
+    /// unsafe {
+    ///     let ptr = Xrc::into_raw(five);
+    ///     Xrc::increment_strong_count_in(ptr, System);
+    ///
+    ///     // This assertion is deterministic because we haven't shared
+    ///     // the `Xrc` between threads.
+    ///     let five = Xrc::from_raw_in(ptr, System);
+    ///     assert_eq!(2, Xrc::strong_count(&five));
+    /// }
+    /// ```
+    #[inline]
+    pub unsafe fn increment_strong_count_in(ptr: *const T, alloc: A)
+    where
+        A: Clone,
+    {
+        // Retain Xrc, but don't touch refcount by wrapping in ManuallyDrop
+        let xrc = unsafe { mem::ManuallyDrop::new(Xrc::from_raw_in(ptr, alloc)) };
+        // Now increase refcount, but don't drop new refcount either
+        let _xrc_clone: mem::ManuallyDrop<_> = xrc.clone();
+    }
+
+    /// Decrements the strong reference count on the `Xrc<T>` associated with the
+    /// provided pointer by one.
+    ///
+    /// # Safety
+    ///
+    /// The pointer must have been obtained through `Xrc::into_raw`,  the
+    /// associated `Xrc` instance must be valid (i.e. the strong count must be at
+    /// least 1) when invoking this method, and `ptr` must point to a block of memory
+    /// allocated by `alloc`. This method can be used to release the final
+    /// `Xrc` and backing storage, but **should not** be called after the final `Xrc` has been
+    /// released.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use pi_share::xrc::Xrc;
+    /// use std::alloc::System;
+    ///
+    /// let five = Xrc::new_in(5, System);
+    ///
+    /// unsafe {
+    ///     let ptr = Xrc::into_raw(five);
+    ///     Xrc::increment_strong_count_in(ptr, System);
+    ///
+    ///     // Those assertions are deterministic because we haven't shared
+    ///     // the `Xrc` between threads.
+    ///     let five = Xrc::from_raw_in(ptr, System);
+    ///     assert_eq!(2, Xrc::strong_count(&five));
+    ///     Xrc::decrement_strong_count_in(ptr, System);
+    ///     assert_eq!(1, Xrc::strong_count(&five));
+    /// }
+    /// ```
+    #[inline]
+    pub unsafe fn decrement_strong_count_in(ptr: *const T, alloc: A) {
+        unsafe { drop(Xrc::from_raw_in(ptr, alloc)) };
     }
 
     #[inline]
     fn inner(&self) -> &XrcInner<T> {
-        // This unsafety is ok because while this Xrc is alive we're guaranteed
+        // This unsafety is ok because while this xrc is alive we're guaranteed
         // that the inner pointer is valid. Furthermore, we know that the
         // `XrcInner` structure itself is `Sync` because the inner data is
         // `Sync` as well, so we're ok loaning out an immutable pointer to these
@@ -1215,11 +1685,14 @@ impl<T: ?Sized> Xrc<T> {
         unsafe { ptr::drop_in_place(Self::get_mut_unchecked(self)) };
 
         // Drop the weak ref collectively held by all strong references
-        drop(Weak { ptr: self.ptr });
+        // Take a reference to `self.alloc` instead of cloning because 1. it'll
+        // last long enough, and 2. you should be able to drop `Xrc`s with
+        // unclonable allocators
+        drop(Weak { ptr: self.ptr, alloc: &self.alloc });
     }
 
     /// Returns `true` if the two `Xrc`s point to the same allocation in a vein similar to
-    /// [`ptr::eq`]. See [that function][`ptr::eq`] for caveats when comparing `dyn Trait` pointers.
+    /// [`ptr::eq`]. This function ignores the metadata of  `dyn Trait` pointers.
     ///
     /// # Examples
     ///
@@ -1238,7 +1711,7 @@ impl<T: ?Sized> Xrc<T> {
     #[inline]
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        this.ptr.as_ptr() == other.ptr.as_ptr()
+        ptr::addr_eq(this.ptr.as_ptr(), other.ptr.as_ptr())
     }
 }
 
@@ -1246,7 +1719,7 @@ impl<T: ?Sized> Xrc<T> {
     /// Allocates an `XrcInner<T>` with sufficient space for
     /// a possibly-unsized inner value where the value has the layout provided.
     ///
-    /// The function `mem_to_Xrcinner` is called with the data pointer
+    /// The function `mem_to_xrcinner` is called with the data pointer
     /// and must return back a (potentially fat)-pointer for the `XrcInner<T>`.
     #[cfg(not(no_global_oom_handling))]
     unsafe fn allocate_for_layout(
@@ -1255,17 +1728,17 @@ impl<T: ?Sized> Xrc<T> {
         mem_to_xrcinner: impl FnOnce(*mut u8) -> *mut XrcInner<T>,
     ) -> *mut XrcInner<T> {
         let layout = xrcinner_layout_for_value_layout(value_layout);
-        unsafe {
-            Xrc::try_allocate_for_layout(value_layout, allocate, mem_to_xrcinner)
-                .unwrap_or_else(|_| handle_alloc_error(layout))
-        }
+
+        let ptr = allocate(layout).unwrap_or_else(|_| handle_alloc_error(layout));
+
+        unsafe { Self::initialize_xrcinner(ptr, layout, mem_to_xrcinner) }
     }
 
     /// Allocates an `XrcInner<T>` with sufficient space for
     /// a possibly-unsized inner value where the value has the layout provided,
     /// returning an error if allocation fails.
     ///
-    /// The function `mem_to_Xrcinner` is called with the data pointer
+    /// The function `mem_to_xrcinner` is called with the data pointer
     /// and must return back a (potentially fat)-pointer for the `XrcInner<T>`.
     unsafe fn try_allocate_for_layout(
         value_layout: Layout,
@@ -1276,7 +1749,16 @@ impl<T: ?Sized> Xrc<T> {
 
         let ptr = allocate(layout)?;
 
-        // Initialize the XrcInner
+        let inner = unsafe { Self::initialize_xrcinner(ptr, layout, mem_to_xrcinner) };
+
+        Ok(inner)
+    }
+
+    unsafe fn initialize_xrcinner(
+        ptr: NonNull<[u8]>,
+        layout: Layout,
+        mem_to_xrcinner: impl FnOnce(*mut u8) -> *mut XrcInner<T>,
+    ) -> *mut XrcInner<T> {
         let inner = mem_to_xrcinner(ptr.as_non_null_ptr().as_ptr());
         debug_assert_eq!(unsafe { Layout::for_value(&*inner) }, layout);
 
@@ -1285,42 +1767,44 @@ impl<T: ?Sized> Xrc<T> {
             ptr::write(&mut (*inner).weak, ShareUsize::new(1));
         }
 
-        Ok(inner)
+        inner
     }
+}
 
+impl<T: ?Sized, A: Allocator> Xrc<T, A> {
     /// Allocates an `XrcInner<T>` with sufficient space for an unsized inner value.
+    #[inline]
     #[cfg(not(no_global_oom_handling))]
-    unsafe fn allocate_for_ptr(ptr: *const T) -> *mut XrcInner<T> {
+    unsafe fn allocate_for_ptr_in(ptr: *const T, alloc: &A) -> *mut XrcInner<T> {
         // Allocate for the `XrcInner<T>` using the given value.
         unsafe {
-            Self::allocate_for_layout(
+            Xrc::allocate_for_layout(
                 Layout::for_value(&*ptr),
-                |layout| Global.allocate(layout),
+                |layout| alloc.allocate(layout),
                 |mem| mem.with_metadata_of(ptr as *const XrcInner<T>),
             )
         }
     }
 
     #[cfg(not(no_global_oom_handling))]
-    fn from_box(v: Box<T>) -> Xrc<T> {
+    fn from_box_in(src: Box<T, A>) -> Xrc<T, A> {
         unsafe {
-            let (box_unique, alloc) = Box::into_unique(v);
-            let bptr = box_unique.as_ptr();
-
-            let value_size = size_of_val(&*bptr);
-            let ptr = Self::allocate_for_ptr(bptr);
+            let value_size = size_of_val(&*src);
+            let ptr = Self::allocate_for_ptr_in(&*src, Box::allocator(&src));
 
             // Copy value as bytes
             ptr::copy_nonoverlapping(
-                bptr as *const T as *const u8,
+                &*src as *const T as *const u8,
                 &mut (*ptr).data as *mut _ as *mut u8,
                 value_size,
             );
 
             // Free the allocation without dropping its contents
-            box_free(box_unique, alloc);
+            let (bptr, alloc) = Box::into_raw_with_allocator(src);
+            let src = Box::from_raw(bptr as *mut mem::ManuallyDrop<T>);
+            drop(src);
 
-            Self::from_ptr(ptr)
+            Self::from_ptr_in(ptr, alloc)
         }
     }
 }
@@ -1333,7 +1817,7 @@ impl<T> Xrc<[T]> {
             Self::allocate_for_layout(
                 Layout::array::<T>(len).unwrap(),
                 |layout| Global.allocate(layout),
-                |mem| ptr::slice_from_raw_parts_mut(mem as *mut T, len) as *mut XrcInner<[T]>,
+                |mem| ptr::slice_from_raw_parts_mut(mem.cast::<T>(), len) as *mut XrcInner<[T]>,
             )
         }
     }
@@ -1341,16 +1825,16 @@ impl<T> Xrc<[T]> {
     /// Copy elements from slice into newly allocated `Xrc<[T]>`
     ///
     /// Unsafe because the caller must either take ownership or bind `T: Copy`.
-    #[cfg(not(no_global_oom_handling))]
-    unsafe fn copy_from_slice(v: &[T]) -> Xrc<[T]> {
-        unsafe {
-            let ptr = Self::allocate_for_slice(v.len());
+    // #[cfg(not(no_global_oom_handling))]
+    // unsafe fn copy_from_slice(v: &[T]) -> Xrc<[T]> {
+    //     unsafe {
+    //         let ptr = Self::allocate_for_slice(v.len());
 
-            ptr::copy_nonoverlapping(v.as_ptr(), &mut (*ptr).data as *mut [T] as *mut T, v.len());
+    //         ptr::copy_nonoverlapping(v.as_ptr(), &mut (*ptr).data as *mut [T] as *mut T, v.len());
 
-            Self::from_ptr(ptr)
-        }
-    }
+    //         Self::from_ptr(ptr)
+    //     }
+    // }
 
     /// Constructs an `Xrc<[T]>` from an iterator known to be of a certain size.
     ///
@@ -1387,12 +1871,7 @@ impl<T> Xrc<[T]> {
             // Pointer to first element
             let elems = &mut (*ptr).data as *mut [T] as *mut T;
 
-            let mut guard = Guard {
-                mem: NonNull::new_unchecked(mem),
-                elems,
-                layout,
-                n_elems: 0,
-            };
+            let mut guard = Guard { mem: NonNull::new_unchecked(mem), elems, layout, n_elems: 0 };
 
             for (i, item) in iter.enumerate() {
                 ptr::write(elems.add(i), item);
@@ -1400,9 +1879,24 @@ impl<T> Xrc<[T]> {
             }
 
             // All clear. Forget the guard so it doesn't free the new XrcInner.
-            forget(guard);
+            mem::forget(guard);
 
             Self::from_ptr(ptr)
+        }
+    }
+}
+
+impl<T, A: Allocator> Xrc<[T], A> {
+    /// Allocates an `XrcInner<[T]>` with the given length.
+    #[inline]
+    #[cfg(not(no_global_oom_handling))]
+    unsafe fn allocate_for_slice_in(len: usize, alloc: &A) -> *mut XrcInner<[T]> {
+        unsafe {
+            Xrc::allocate_for_layout(
+                Layout::array::<T>(len).unwrap(),
+                |layout| alloc.allocate(layout),
+                |mem| ptr::slice_from_raw_parts_mut(mem.cast::<T>(), len) as *mut XrcInner<[T]>,
+            )
         }
     }
 }
@@ -1416,20 +1910,20 @@ trait XrcFromSlice<T> {
 #[cfg(not(no_global_oom_handling))]
 impl<T: Clone> XrcFromSlice<T> for Xrc<[T]> {
     #[inline]
-    default fn from_slice(v: &[T]) -> Self {
+    fn from_slice(v: &[T]) -> Self {
         unsafe { Self::from_iter_exact(v.iter().cloned(), v.len()) }
     }
 }
 
-#[cfg(not(no_global_oom_handling))]
-impl<T: Copy> XrcFromSlice<T> for Xrc<[T]> {
-    #[inline]
-    fn from_slice(v: &[T]) -> Self {
-        unsafe { Xrc::copy_from_slice(v) }
-    }
-}
+// #[cfg(not(no_global_oom_handling))]
+// impl<T: Copy> XrcFromSlice<T> for Xrc<[T]> {
+//     #[inline]
+//     fn from_slice(v: &[T]) -> Self {
+//         unsafe { Xrc::copy_from_slice(v) }
+//     }
+// }
 
-impl<T: ?Sized> Clone for Xrc<T> {
+impl<T: ?Sized, A: Allocator + Clone> Clone for Xrc<T, A> {
     /// Makes a clone of the `Xrc` pointer.
     ///
     /// This creates another pointer to the same allocation, increasing the
@@ -1445,7 +1939,7 @@ impl<T: ?Sized> Clone for Xrc<T> {
     /// let _ = Xrc::clone(&five);
     /// ```
     #[inline]
-    fn clone(&self) -> Xrc<T> {
+    fn clone(&self) -> Xrc<T, A> {
         // Using a relaxed ordering is alright here, as knowledge of the
         // original reference prevents other threads from erroneously deleting
         // the object.
@@ -1459,7 +1953,7 @@ impl<T: ?Sized> Clone for Xrc<T> {
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
         let old_size = self.inner().strong.fetch_add(1, Relaxed);
 
-        // However we need to guard against massive refcounts in case someone is `forget`ing
+        // However we need to guard against massive refcounts in case someone is `mem::forget`ing
         // Xrcs. If we don't do this the count can overflow and users will use-after free. This
         // branch will never be taken in any realistic program. We abort because such a program is
         // incredibly degenerate, and we don't care to support it.
@@ -1478,11 +1972,11 @@ impl<T: ?Sized> Clone for Xrc<T> {
             abort();
         }
 
-        unsafe { Self::from_inner(self.ptr) }
+        unsafe { Self::from_inner_in(self.ptr, self.alloc.clone()) }
     }
 }
 
-impl<T: ?Sized> Deref for Xrc<T> {
+impl<T: ?Sized, A: Allocator> Deref for Xrc<T, A> {
     type Target = T;
 
     #[inline]
@@ -1493,7 +1987,7 @@ impl<T: ?Sized> Deref for Xrc<T> {
 
 impl<T: ?Sized> Receiver for Xrc<T> {}
 
-impl<T: Clone> Xrc<T> {
+impl<T: Clone, A: Allocator + Clone> Xrc<T, A> {
     /// Makes a mutable reference into the given `Xrc`.
     ///
     /// If there are other `Xrc` pointers to the same allocation, then `make_mut` will
@@ -1555,18 +2049,14 @@ impl<T: Clone> Xrc<T> {
         // before release writes (i.e., decrements) to `strong`. Since we hold a
         // weak count, there's no chance the XrcInner itself could be
         // deallocated.
-        if this
-            .inner()
-            .strong
-            .compare_exchange(1, 0, Acquire, Relaxed)
-            .is_err()
-        {
+        if this.inner().strong.compare_exchange(1, 0, Acquire, Relaxed).is_err() {
             // Another strong pointer exists, so we must clone.
             // Pre-allocate memory to allow writing the cloned value directly.
-            let mut xrc = Self::new_uninit();
+            let mut xrc = Self::new_uninit_in(this.alloc.clone());
             unsafe {
                 let data = Xrc::get_mut_unchecked(&mut xrc);
-                (**this).write_clone_into_raw(data.as_mut_ptr());
+                data.as_mut_ptr().write((**this).clone());
+                //(**this).write_clone_into_raw();
                 *this = xrc.assume_init();
             }
         } else if this.inner().weak.load(Relaxed) != 1 {
@@ -1584,10 +2074,10 @@ impl<T: Clone> Xrc<T> {
 
             // Materialize our own implicit weak pointer, so that it can clean
             // up the XrcInner as needed.
-            let _weak = Weak { ptr: this.ptr };
+            let _weak = Weak { ptr: this.ptr, alloc: this.alloc.clone() };
 
             // Can just steal the data, all that's left is Weaks
-            let mut xrc = Self::new_uninit();
+            let mut xrc = Self::new_uninit_in(this.alloc.clone());
             unsafe {
                 let data = Xrc::get_mut_unchecked(&mut xrc);
                 data.as_mut_ptr().copy_from_nonoverlapping(&**this, 1);
@@ -1607,30 +2097,29 @@ impl<T: Clone> Xrc<T> {
     /// If we have the only reference to `T` then unwrap it. Otherwise, clone `T` and return the
     /// clone.
     ///
-    /// Assuming `Xrc_t` is of type `Xrc<T>`, this function is functionally equivalent to
-    /// `(*Xrc_t).clone()`, but will avoid cloning the inner value where possible.
+    /// Assuming `xrc_t` is of type `Xrc<T>`, this function is functionally equivalent to
+    /// `(*xrc_t).clone()`, but will avoid cloning the inner value where possible.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use std::ptr;
-    /// use pi_share::xrc::Xrc;
+    /// # use std::{ptr, sync::Xrc};
     /// let inner = String::from("test");
     /// let ptr = inner.as_ptr();
     ///
-    /// let Xrc = Xrc::new(inner);
-    /// let inner = Xrc::unwrap_or_clone(Xrc);
+    /// let xrc = Xrc::new(inner);
+    /// let inner = Xrc::unwrap_or_clone(xrc);
     /// // The inner value was not cloned
     /// assert!(ptr::eq(ptr, inner.as_ptr()));
     ///
-    /// let Xrc = Xrc::new(inner);
-    /// let Xrc2 = Xrc.clone();
-    /// let inner = Xrc::unwrap_or_clone(Xrc);
+    /// let xrc = Xrc::new(inner);
+    /// let xrc2 = xrc.clone();
+    /// let inner = Xrc::unwrap_or_clone(xrc);
     /// // Because there were 2 references, we had to clone the inner value.
     /// assert!(!ptr::eq(ptr, inner.as_ptr()));
-    /// // `Xrc2` is the last reference, so when we unwrap it we get back
+    /// // `xrc2` is the last reference, so when we unwrap it we get back
     /// // the original `String`.
-    /// let inner = Xrc::unwrap_or_clone(Xrc2);
+    /// let inner = Xrc::unwrap_or_clone(xrc2);
     /// assert!(ptr::eq(ptr, inner.as_ptr()));
     /// ```
     #[inline]
@@ -1639,7 +2128,7 @@ impl<T: Clone> Xrc<T> {
     }
 }
 
-impl<T: ?Sized> Xrc<T> {
+impl<T: ?Sized, A: Allocator> Xrc<T, A> {
     /// Returns a mutable reference into the given `Xrc`, if there are
     /// no other `Xrc` or [`Weak`] pointers to the same allocation.
     ///
@@ -1757,12 +2246,7 @@ impl<T: ?Sized> Xrc<T> {
         // writes to `strong` (in particular in `Weak::upgrade`) prior to decrements
         // of the `weak` count (via `Weak::drop`, which uses release). If the upgraded
         // weak ref was never dropped, the CAS here will fail so we do not care to synchronize.
-        if self
-            .inner()
-            .weak
-            .compare_exchange(1, usize::MAX, Acquire, Relaxed)
-            .is_ok()
-        {
+        if self.inner().weak.compare_exchange(1, usize::MAX, Acquire, Relaxed).is_ok() {
             // This needs to be an `Acquire` to synchronize with the decrement of the `strong`
             // counter in `drop` -- the only access that happens when any but the last reference
             // is being dropped.
@@ -1779,7 +2263,7 @@ impl<T: ?Sized> Xrc<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Xrc<T> {
+impl<T: ?Sized, A: Allocator> Drop for Xrc<T, A> {
     /// Drops the `Xrc`.
     ///
     /// This will decrement the strong reference count. If the strong reference
@@ -1842,7 +2326,7 @@ impl<T: ?Sized> Drop for Xrc<T> {
         //
         // [1]: (www.boost.org/doc/libs/1_55_0/doc/html/atomic/usage_examples.html)
         // [2]: (https://github.com/rust-lang/rust/pull/41714)
-        self.inner().strong.load(Acquire);
+        acquire!(self.inner().strong);
 
         unsafe {
             self.drop_slow();
@@ -1850,13 +2334,12 @@ impl<T: ?Sized> Drop for Xrc<T> {
     }
 }
 
-impl Xrc<dyn Any + Send + Sync> {
+impl<A: Allocator + Clone> Xrc<dyn Any + Send + Sync, A> {
     /// Attempt to downcast the `Xrc<dyn Any + Send + Sync>` to a concrete type.
     ///
     /// # Examples
     ///
     /// ```
-    /// 
     /// use std::any::Any;
     /// use pi_share::xrc::Xrc;
     ///
@@ -1871,15 +2354,16 @@ impl Xrc<dyn Any + Send + Sync> {
     /// print_if_string(Xrc::new(0i8));
     /// ```
     #[inline]
-    pub fn downcast<T>(self) -> Result<Xrc<T>, Self>
+    pub fn downcast<T>(self) -> Result<Xrc<T, A>, Self>
     where
         T: Any + Send + Sync,
     {
         if (*self).is::<T>() {
             unsafe {
                 let ptr = self.ptr.cast::<XrcInner<T>>();
-                forget(self);
-                Ok(Xrc::from_inner(ptr))
+                let alloc = self.alloc.clone();
+                mem::forget(self);
+                Ok(Xrc::from_inner_in(ptr, alloc))
             }
         } else {
             Err(self)
@@ -1913,14 +2397,15 @@ impl Xrc<dyn Any + Send + Sync> {
     ///
     /// [`downcast`]: Self::downcast
     #[inline]
-    pub unsafe fn downcast_unchecked<T>(self) -> Xrc<T>
+    pub unsafe fn downcast_unchecked<T>(self) -> Xrc<T, A>
     where
         T: Any + Send + Sync,
     {
         unsafe {
             let ptr = self.ptr.cast::<XrcInner<T>>();
-            forget(self);
-            Xrc::from_inner(ptr)
+            let alloc = self.alloc.clone();
+            mem::forget(self);
+            Xrc::from_inner_in(ptr, alloc)
         }
     }
 }
@@ -1939,9 +2424,39 @@ impl<T> Weak<T> {
     /// let empty: Weak<i64> = Weak::new();
     /// assert!(empty.upgrade().is_none());
     /// ```
+    #[inline]
+    #[must_use]
     pub const fn new() -> Weak<T> {
         Weak {
             ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<XrcInner<T>>(usize::MAX)) },
+            alloc: Global,
+        }
+    }
+}
+
+impl<T, A: Allocator> Weak<T, A> {
+    /// Constructs a new `Weak<T, A>`, without allocating any memory, technically in the provided
+    /// allocator.
+    /// Calling [`upgrade`] on the return value always gives [`None`].
+    ///
+    /// [`upgrade`]: Weak::upgrade
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    ///
+    /// use std::sync::Weak;
+    /// use std::alloc::System;
+    ///
+    /// let empty: Weak<i64, _> = Weak::new_in(System);
+    /// assert!(empty.upgrade().is_none());
+    /// ```
+    #[inline]
+    pub fn new_in(alloc: A) -> Weak<T, A> {
+        Weak {
+            ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<XrcInner<T>>(usize::MAX)) },
+            alloc,
         }
     }
 }
@@ -1954,6 +2469,54 @@ struct WeakInner<'a> {
 }
 
 impl<T: ?Sized> Weak<T> {
+    /// Converts a raw pointer previously created by [`into_raw`] back into `Weak<T>`.
+    ///
+    /// This can be used to safely get a strong reference (by calling [`upgrade`]
+    /// later) or to deallocate the weak count by dropping the `Weak<T>`.
+    ///
+    /// It takes ownership of one weak reference (with the exception of pointers created by [`new`],
+    /// as these don't own anything; the method still works on them).
+    ///
+    /// # Safety
+    ///
+    /// The pointer must have originated from the [`into_raw`] and must still own its potential
+    /// weak reference.
+    ///
+    /// It is allowed for the strong count to be 0 at the time of calling this. Nevertheless, this
+    /// takes ownership of one weak reference currently represented as a raw pointer (the weak
+    /// count is not modified by this operation) and therefore it must be paired with a previous
+    /// call to [`into_raw`].
+    /// # Examples
+    ///
+    /// ```
+    /// use std::sync::{Xrc, Weak};
+    ///
+    /// let strong = Xrc::new("hello".to_owned());
+    ///
+    /// let raw_1 = Xrc::downgrade(&strong).into_raw();
+    /// let raw_2 = Xrc::downgrade(&strong).into_raw();
+    ///
+    /// assert_eq!(2, Xrc::weak_count(&strong));
+    ///
+    /// assert_eq!("hello", &*unsafe { Weak::from_raw(raw_1) }.upgrade().unwrap());
+    /// assert_eq!(1, Xrc::weak_count(&strong));
+    ///
+    /// drop(strong);
+    ///
+    /// // Decrement the last weak count.
+    /// assert!(unsafe { Weak::from_raw(raw_2) }.upgrade().is_none());
+    /// ```
+    ///
+    /// [`new`]: Weak::new
+    /// [`into_raw`]: Weak::into_raw
+    /// [`upgrade`]: Weak::upgrade
+    #[inline]
+    pub unsafe fn from_raw(ptr: *const T) -> Self {
+        unsafe { Weak::from_raw_in(ptr, Global) }
+    }
+}
+
+impl<T: ?Sized, A: Allocator> Weak<T, A> {
     /// Returns a raw pointer to the object `T` pointed to by this `Weak<T>`.
     ///
     /// The pointer is valid only if there are some strong references. The pointer may be dangling,
@@ -2007,7 +2570,7 @@ impl<T: ?Sized> Weak<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// let strong = Xrc::new("hello".to_owned());
     /// let weak = Xrc::downgrade(&strong);
@@ -2022,13 +2585,15 @@ impl<T: ?Sized> Weak<T> {
     ///
     /// [`from_raw`]: Weak::from_raw
     /// [`as_ptr`]: Weak::as_ptr
+    #[must_use = "`self` will be dropped if the result is not used"]
     pub fn into_raw(self) -> *const T {
         let result = self.as_ptr();
-        forget(self);
+        mem::forget(self);
         result
     }
 
-    /// Converts a raw pointer previously created by [`into_raw`] back into `Weak<T>`.
+    /// Converts a raw pointer previously created by [`into_raw`] back into `Weak<T>` in the provided
+    /// allocator.
     ///
     /// This can be used to safely get a strong reference (by calling [`upgrade`]
     /// later) or to deallocate the weak count by dropping the `Weak<T>`.
@@ -2039,7 +2604,7 @@ impl<T: ?Sized> Weak<T> {
     /// # Safety
     ///
     /// The pointer must have originated from the [`into_raw`] and must still own its potential
-    /// weak reference.
+    /// weak reference, and must point to a block of memory allocated by `alloc`.
     ///
     /// It is allowed for the strong count to be 0 at the time of calling this. Nevertheless, this
     /// takes ownership of one weak reference currently represented as a raw pointer (the weak
@@ -2048,7 +2613,7 @@ impl<T: ?Sized> Weak<T> {
     /// # Examples
     ///
     /// ```
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// let strong = Xrc::new("hello".to_owned());
     ///
@@ -2069,7 +2634,8 @@ impl<T: ?Sized> Weak<T> {
     /// [`new`]: Weak::new
     /// [`into_raw`]: Weak::into_raw
     /// [`upgrade`]: Weak::upgrade
-    pub unsafe fn from_raw(ptr: *const T) -> Self {
+    #[inline]
+    pub unsafe fn from_raw_in(ptr: *const T, alloc: A) -> Self {
         // See Weak::as_ptr for context on how the input pointer is derived.
 
         let ptr = if is_dangling(ptr as *mut T) {
@@ -2085,13 +2651,11 @@ impl<T: ?Sized> Weak<T> {
         };
 
         // SAFETY: we now have recovered the original Weak pointer, so can create the Weak.
-        Weak {
-            ptr: unsafe { NonNull::new_unchecked(ptr) },
-        }
+        Weak { ptr: unsafe { NonNull::new_unchecked(ptr) }, alloc }
     }
 }
 
-impl<T: ?Sized> Weak<T> {
+impl<T: ?Sized, A: Allocator> Weak<T, A> {
     /// Attempts to upgrade the `Weak` pointer to an [`Xrc`], delaying
     /// dropping of the inner value if successful.
     ///
@@ -2117,39 +2681,43 @@ impl<T: ?Sized> Weak<T> {
     /// ```
     #[must_use = "this returns a new `Xrc`, \
                   without modifying the original weak pointer"]
-    pub fn upgrade(&self) -> Option<Xrc<T>> {
+    pub fn upgrade(&self) -> Option<Xrc<T, A>>
+    where
+        A: Clone,
+    {
+        #[inline]
+        fn checked_increment(n: usize) -> Option<usize> {
+            // Any write of 0 we can observe leaves the field in permanently zero state.
+            if n == 0 {
+                return None;
+            }
+            // See comments in `Xrc::clone` for why we do this (for `mem::forget`).
+            assert!(n <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
+            Some(n + 1)
+        }
+
         // We use a CAS loop to increment the strong count instead of a
         // fetch_add as this function should never take the reference count
         // from zero to one.
-        self.inner()?
-            .strong
-            // Relaxed is fine for the failure case because we don't have any expectations about the new state.
-            // Acquire is necessary for the success case to synchronise with `Xrc::new_cyclic`, when the inner
-            // value can be initialized after `Weak` references have already been created. In that case, we
-            // expect to observe the fully initialized value.
-            .fetch_update(Acquire, Relaxed, |n| {
-                // Any write of 0 we can observe leaves the field in permanently zero state.
-                if n == 0 {
-                    return None;
-                }
-                // See comments in `Xrc::clone` for why we do this (for `forget`).
-                assert!(n <= MAX_REFCOUNT, "{}", INTERNAL_OVERFLOW_ERROR);
-                Some(n + 1)
-            })
-            .ok()
-            // null checked above
-            .map(|_| unsafe { Xrc::from_inner(self.ptr) })
+        //
+        // Relaxed is fine for the failure case because we don't have any expectations about the new state.
+        // Acquire is necessary for the success case to synchronise with `Xrc::new_cyclic`, when the inner
+        // value can be initialized after `Weak` references have already been created. In that case, we
+        // expect to observe the fully initialized value.
+        if self.inner()?.strong.fetch_update(Acquire, Relaxed, checked_increment).is_ok() {
+            // SAFETY: pointer is not null, verified in checked_increment
+            unsafe { Some(Xrc::from_inner_in(self.ptr, self.alloc.clone())) }
+        } else {
+            None
+        }
     }
 
     /// Gets the number of strong (`Xrc`) pointers pointing to this allocation.
     ///
     /// If `self` was created using [`Weak::new`], this will return 0.
+    #[must_use]
     pub fn strong_count(&self) -> usize {
-        if let Some(inner) = self.inner() {
-            inner.strong.load(Acquire)
-        } else {
-            0
-        }
+        if let Some(inner) = self.inner() { inner.strong.load(Relaxed) } else { 0 }
     }
 
     /// Gets an approximation of the number of `Weak` pointers pointing to this
@@ -2163,48 +2731,44 @@ impl<T: ?Sized> Weak<T> {
     /// Due to implementation details, the returned value can be off by 1 in
     /// either direction when other threads are manipulating any `Xrc`s or
     /// `Weak`s pointing to the same allocation.
+    #[must_use]
     pub fn weak_count(&self) -> usize {
-        self.inner()
-            .map(|inner| {
-                let weak = inner.weak.load(Acquire);
-                let strong = inner.strong.load(Acquire);
-                if strong == 0 {
-                    0
-                } else {
-                    // Since we observed that there was at least one strong pointer
-                    // after reading the weak count, we know that the implicit weak
-                    // reference (present whenever any strong references are alive)
-                    // was still around when we observed the weak count, and can
-                    // therefore safely subtract it.
-                    weak - 1
-                }
-            })
-            .unwrap_or(0)
+        if let Some(inner) = self.inner() {
+            let weak = inner.weak.load(Acquire);
+            let strong = inner.strong.load(Relaxed);
+            if strong == 0 {
+                0
+            } else {
+                // Since we observed that there was at least one strong pointer
+                // after reading the weak count, we know that the implicit weak
+                // reference (present whenever any strong references are alive)
+                // was still around when we observed the weak count, and can
+                // therefore safely subtract it.
+                weak - 1
+            }
+        } else {
+            0
+        }
     }
 
     /// Returns `None` when the pointer is dangling and there is no allocated `XrcInner`,
     /// (i.e., when this `Weak` was created by `Weak::new`).
     #[inline]
     fn inner(&self) -> Option<WeakInner<'_>> {
-        if is_dangling(self.ptr.as_ptr()) {
+        let ptr = self.ptr.as_ptr();
+        if is_dangling(ptr) {
             None
         } else {
             // We are careful to *not* create a reference covering the "data" field, as
             // the field may be mutated concurrently (for example, if the last `Xrc`
             // is dropped, the data field will be dropped in-place).
-            Some(unsafe {
-                let ptr = self.ptr.as_ptr();
-                WeakInner {
-                    strong: &(*ptr).strong,
-                    weak: &(*ptr).weak,
-                }
-            })
+            Some(unsafe { WeakInner { strong: &(*ptr).strong, weak: &(*ptr).weak } })
         }
     }
 
     /// Returns `true` if the two `Weak`s point to the same allocation similar to [`ptr::eq`], or if
-    /// both don't point to any allocation (because they were created with `Weak::new()`). See [that
-    /// function][`ptr::eq`] for caveats when comparing `dyn Trait` pointers.
+    /// both don't point to any allocation (because they were created with `Weak::new()`). However,
+    /// this function ignores the metadata of  `dyn Trait` pointers.
     ///
     /// # Notes
     ///
@@ -2231,7 +2795,7 @@ impl<T: ?Sized> Weak<T> {
     /// Comparing `Weak::new`.
     ///
     /// ```
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// let first = Weak::new();
     /// let second = Weak::new();
@@ -2244,29 +2808,30 @@ impl<T: ?Sized> Weak<T> {
     ///
     /// [`ptr::eq`]: core::ptr::eq "ptr::eq"
     #[inline]
+    #[must_use]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        self.ptr.as_ptr() == other.ptr.as_ptr()
+        ptr::addr_eq(self.ptr.as_ptr(), other.ptr.as_ptr())
     }
 }
 
-impl<T: ?Sized> Clone for Weak<T> {
+impl<T: ?Sized, A: Allocator + Clone> Clone for Weak<T, A> {
     /// Makes a clone of the `Weak` pointer that points to the same allocation.
     ///
     /// # Examples
     ///
     /// ```
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// let weak_five = Xrc::downgrade(&Xrc::new(5));
     ///
     /// let _ = Weak::clone(&weak_five);
     /// ```
     #[inline]
-    fn clone(&self) -> Weak<T> {
+    fn clone(&self) -> Weak<T, A> {
         let inner = if let Some(inner) = self.inner() {
             inner
         } else {
-            return Weak { ptr: self.ptr };
+            return Weak { ptr: self.ptr, alloc: self.alloc.clone() };
         };
         // See comments in Xrc::clone() for why this is relaxed. This can use a
         // fetch_add (ignoring the lock) because the weak count is only locked
@@ -2274,12 +2839,12 @@ impl<T: ?Sized> Clone for Weak<T> {
         // running this code in that case).
         let old_size = inner.weak.fetch_add(1, Relaxed);
 
-        // See comments in Xrc::clone() for why we do this (for forget).
+        // See comments in Xrc::clone() for why we do this (for mem::forget).
         if old_size > MAX_REFCOUNT {
             abort();
         }
 
-        Weak { ptr: self.ptr }
+        Weak { ptr: self.ptr, alloc: self.alloc.clone() }
     }
 }
 
@@ -2303,13 +2868,13 @@ impl<T> Default for Weak<T> {
     }
 }
 
-impl<T: ?Sized> Drop for Weak<T> {
+impl<T: ?Sized, A: Allocator> Drop for Weak<T, A> {
     /// Drops the `Weak` pointer.
     ///
     /// # Examples
     ///
     /// ```
-    /// use pi_share::xrc::{Xrc, Weak};
+    /// use std::sync::{Xrc, Weak};
     ///
     /// struct Foo;
     ///
@@ -2337,36 +2902,35 @@ impl<T: ?Sized> Drop for Weak<T> {
         // weak count can only be locked if there was precisely one weak ref,
         // meaning that drop could only subsequently run ON that remaining weak
         // ref, which can only happen after the lock is released.
-        let inner = if let Some(inner) = self.inner() {
-            inner
-        } else {
-            return;
-        };
+        let inner = if let Some(inner) = self.inner() { inner } else { return };
 
         if inner.weak.fetch_sub(1, Release) == 1 {
-            inner.weak.load(Acquire);
-            unsafe { Global.deallocate(self.ptr.cast(), Layout::for_value_raw(self.ptr.as_ptr())) }
+            acquire!(inner.weak);
+            unsafe {
+                self.alloc.deallocate(self.ptr.cast(), Layout::for_value_raw(self.ptr.as_ptr()))
+            }
         }
     }
 }
 
-trait XrcEqIdent<T: ?Sized + PartialEq> {
-    fn eq(&self, other: &Xrc<T>) -> bool;
-    fn ne(&self, other: &Xrc<T>) -> bool;
+trait XrcEqIdent<T: ?Sized + PartialEq, A: Allocator> {
+    fn eq(&self, other: &Xrc<T, A>) -> bool;
+    fn ne(&self, other: &Xrc<T, A>) -> bool;
 }
 
-impl<T: ?Sized + PartialEq> XrcEqIdent<T> for Xrc<T> {
+impl<T: ?Sized + PartialEq, A: Allocator> XrcEqIdent<T, A> for Xrc<T, A> {
     #[inline]
-    default fn eq(&self, other: &Xrc<T>) -> bool {
+    fn eq(&self, other: &Xrc<T, A>) -> bool {
         **self == **other
     }
     #[inline]
-    default fn ne(&self, other: &Xrc<T>) -> bool {
+    fn ne(&self, other: &Xrc<T, A>) -> bool {
         **self != **other
     }
 }
 
-impl<T: ?Sized + PartialEq> PartialEq for Xrc<T> {
+
+impl<T: ?Sized + PartialEq, A: Allocator> PartialEq for Xrc<T, A> {
     /// Equality for two `Xrc`s.
     ///
     /// Two `Xrc`s are equal if their inner values are equal, even if they are
@@ -2385,7 +2949,7 @@ impl<T: ?Sized + PartialEq> PartialEq for Xrc<T> {
     /// assert!(five == Xrc::new(5));
     /// ```
     #[inline]
-    fn eq(&self, other: &Xrc<T>) -> bool {
+    fn eq(&self, other: &Xrc<T, A>) -> bool {
         XrcEqIdent::eq(self, other)
     }
 
@@ -2406,12 +2970,12 @@ impl<T: ?Sized + PartialEq> PartialEq for Xrc<T> {
     /// assert!(five != Xrc::new(6));
     /// ```
     #[inline]
-    fn ne(&self, other: &Xrc<T>) -> bool {
+    fn ne(&self, other: &Xrc<T, A>) -> bool {
         XrcEqIdent::ne(self, other)
     }
 }
 
-impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
+impl<T: ?Sized + PartialOrd, A: Allocator> PartialOrd for Xrc<T, A> {
     /// Partial comparison for two `Xrc`s.
     ///
     /// The two are compared by calling `partial_cmp()` on their inner values.
@@ -2426,7 +2990,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
     ///
     /// assert_eq!(Some(Ordering::Less), five.partial_cmp(&Xrc::new(6)));
     /// ```
-    fn partial_cmp(&self, other: &Xrc<T>) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Xrc<T, A>) -> Option<Ordering> {
         (**self).partial_cmp(&**other)
     }
 
@@ -2443,7 +3007,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
     ///
     /// assert!(five < Xrc::new(6));
     /// ```
-    fn lt(&self, other: &Xrc<T>) -> bool {
+    fn lt(&self, other: &Xrc<T, A>) -> bool {
         *(*self) < *(*other)
     }
 
@@ -2460,7 +3024,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
     ///
     /// assert!(five <= Xrc::new(5));
     /// ```
-    fn le(&self, other: &Xrc<T>) -> bool {
+    fn le(&self, other: &Xrc<T, A>) -> bool {
         *(*self) <= *(*other)
     }
 
@@ -2477,7 +3041,7 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
     ///
     /// assert!(five > Xrc::new(4));
     /// ```
-    fn gt(&self, other: &Xrc<T>) -> bool {
+    fn gt(&self, other: &Xrc<T, A>) -> bool {
         *(*self) > *(*other)
     }
 
@@ -2494,11 +3058,11 @@ impl<T: ?Sized + PartialOrd> PartialOrd for Xrc<T> {
     ///
     /// assert!(five >= Xrc::new(5));
     /// ```
-    fn ge(&self, other: &Xrc<T>) -> bool {
+    fn ge(&self, other: &Xrc<T, A>) -> bool {
         *(*self) >= *(*other)
     }
 }
-impl<T: ?Sized + Ord> Ord for Xrc<T> {
+impl<T: ?Sized + Ord, A: Allocator> Ord for Xrc<T, A> {
     /// Comparison for two `Xrc`s.
     ///
     /// The two are compared by calling `cmp()` on their inner values.
@@ -2513,25 +3077,25 @@ impl<T: ?Sized + Ord> Ord for Xrc<T> {
     ///
     /// assert_eq!(Ordering::Less, five.cmp(&Xrc::new(6)));
     /// ```
-    fn cmp(&self, other: &Xrc<T>) -> Ordering {
+    fn cmp(&self, other: &Xrc<T, A>) -> Ordering {
         (**self).cmp(&**other)
     }
 }
-impl<T: ?Sized + Eq> Eq for Xrc<T> {}
+impl<T: ?Sized + Eq, A: Allocator> Eq for Xrc<T, A> {}
 
-impl<T: ?Sized + fmt::Display> fmt::Display for Xrc<T> {
+impl<T: ?Sized + fmt::Display, A: Allocator> fmt::Display for Xrc<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized + fmt::Debug> fmt::Debug for Xrc<T> {
+impl<T: ?Sized + fmt::Debug, A: Allocator> fmt::Debug for Xrc<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&**self, f)
     }
 }
 
-impl<T: ?Sized> fmt::Pointer for Xrc<T> {
+impl<T: ?Sized, A: Allocator> fmt::Pointer for Xrc<T, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
@@ -2554,7 +3118,7 @@ impl<T: Default> Default for Xrc<T> {
     }
 }
 
-impl<T: ?Sized + Hash> Hash for Xrc<T> {
+impl<T: ?Sized + Hash, A: Allocator> Hash for Xrc<T, A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         (**self).hash(state)
     }
@@ -2572,14 +3136,15 @@ impl<T> From<T> for Xrc<T> {
     /// ```rust
     /// # use pi_share::xrc::Xrc;
     /// let x = 5;
-    /// let Xrc = Xrc::new(5);
+    /// let xrc = Xrc::new(5);
     ///
-    /// assert_eq!(Xrc::from(x), Xrc);
+    /// assert_eq!(Xrc::from(x), xrc);
     /// ```
     fn from(t: T) -> Self {
         Xrc::new(t)
     }
 }
+
 
 #[cfg(not(no_global_oom_handling))]
 impl<T: Clone> From<&[T]> for Xrc<[T]> {
@@ -2636,7 +3201,7 @@ impl From<String> for Xrc<str> {
 }
 
 #[cfg(not(no_global_oom_handling))]
-impl<T: ?Sized> From<Box<T>> for Xrc<T> {
+impl<T: ?Sized, A: Allocator> From<Box<T, A>> for Xrc<T, A> {
     /// Move a boxed object to a new, reference-counted allocation.
     ///
     /// # Example
@@ -2648,13 +3213,13 @@ impl<T: ?Sized> From<Box<T>> for Xrc<T> {
     /// assert_eq!("eggplant", &shared[..]);
     /// ```
     #[inline]
-    fn from(v: Box<T>) -> Xrc<T> {
-        Xrc::from_box(v)
+    fn from(v: Box<T, A>) -> Xrc<T, A> {
+        Xrc::from_box_in(v)
     }
 }
 
 #[cfg(not(no_global_oom_handling))]
-impl<T> From<Vec<T>> for Xrc<[T]> {
+impl<T, A: Allocator + Clone> From<Vec<T, A>> for Xrc<[T], A> {
     /// Allocate a reference-counted slice and move `v`'s items into it.
     ///
     /// # Example
@@ -2666,12 +3231,18 @@ impl<T> From<Vec<T>> for Xrc<[T]> {
     /// assert_eq!(&[1, 2, 3], &shared[..]);
     /// ```
     #[inline]
-    fn from(mut v: Vec<T>) -> Xrc<[T]> {
+    fn from(v: Vec<T, A>) -> Xrc<[T], A> {
         unsafe {
-            let rc = Xrc::copy_from_slice(&v);
-            // Allow the Vec to free its memory, but not destroy its contents
-            v.set_len(0);
-            rc
+            let (vec_ptr, len, cap, alloc) = v.into_raw_parts_with_alloc();
+
+            let rc_ptr = Self::allocate_for_slice_in(len, &alloc);
+            ptr::copy_nonoverlapping(vec_ptr, &mut (*rc_ptr).data as *mut [T] as *mut T, len);
+
+            // Create a `Vec<T, &A>` with length 0, to deallocate the buffer
+            // without dropping its contents or the allocator
+            let _ = Vec::from_raw_parts_in(vec_ptr, 0, cap, &alloc);
+
+            Self::from_ptr_in(rc_ptr, alloc)
         }
     }
 }
@@ -2720,12 +3291,13 @@ impl From<Xrc<str>> for Xrc<[u8]> {
     }
 }
 
-impl<T, const N: usize> TryFrom<Xrc<[T]>> for Xrc<[T; N]> {
-    type Error = Xrc<[T]>;
+impl<T, A: Allocator + Clone, const N: usize> TryFrom<Xrc<[T], A>> for Xrc<[T; N], A> {
+    type Error = Xrc<[T], A>;
 
-    fn try_from(boxed_slice: Xrc<[T]>) -> Result<Self, Self::Error> {
+    fn try_from(boxed_slice: Xrc<[T], A>) -> Result<Self, Self::Error> {
         if boxed_slice.len() == N {
-            Ok(unsafe { Xrc::from_raw(Xrc::into_raw(boxed_slice) as *mut [T; N]) })
+            let alloc = boxed_slice.alloc.clone();
+            Ok(unsafe { Xrc::from_raw_in(Xrc::into_raw(boxed_slice) as *mut [T; N], alloc) })
         } else {
             Err(boxed_slice)
         }
@@ -2777,6 +3349,7 @@ impl<T> FromIterator<T> for Xrc<[T]> {
     }
 }
 
+#[cfg(not(no_global_oom_handling))]
 /// Specialization trait used for collecting into `Xrc<[T]>`.
 trait ToXrcSlice<T>: Iterator<Item = T> + Sized {
     fn to_xrc_slice(self) -> Xrc<[T]>;
@@ -2784,72 +3357,51 @@ trait ToXrcSlice<T>: Iterator<Item = T> + Sized {
 
 #[cfg(not(no_global_oom_handling))]
 impl<T, I: Iterator<Item = T>> ToXrcSlice<T> for I {
-    default fn to_xrc_slice(self) -> Xrc<[T]> {
+    fn to_xrc_slice(self) -> Xrc<[T]> {
         self.collect::<Vec<T>>().into()
     }
 }
 
-#[cfg(not(no_global_oom_handling))]
-impl<T, I: iter::TrustedLen<Item = T>> ToXrcSlice<T> for I {
-    fn to_xrc_slice(self) -> Xrc<[T]> {
-        // This is the case for a `TrustedLen` iterator.
-        let (low, high) = self.size_hint();
-        if let Some(high) = high {
-            debug_assert_eq!(
-                low,
-                high,
-                "TrustedLen iterator's size hint is not exact: {:?}",
-                (low, high)
-            );
+// #[cfg(not(no_global_oom_handling))]
+// impl<T, I: iter::TrustedLen<Item = T>> ToXrcSlice<T> for I {
+//     fn to_xrc_slice(self) -> Xrc<[T]> {
+//         // This is the case for a `TrustedLen` iterator.
+//         let (low, high) = self.size_hint();
+//         if let Some(high) = high {
+//             debug_assert_eq!(
+//                 low,
+//                 high,
+//                 "TrustedLen iterator's size hint is not exact: {:?}",
+//                 (low, high)
+//             );
 
-            unsafe {
-                // SAFETY: We need to ensure that the iterator has an exact length and we have.
-                Xrc::from_iter_exact(self, low)
-            }
-        } else {
-            // TrustedLen contract guarantees that `upper_bound == None` implies an iterator
-            // length exceeding `usize::MAX`.
-            // The default implementation would collect into a vec which would panic.
-            // Thus we panic here immediately without invoking `Vec` code.
-            panic!("capacity overflow");
-        }
-    }
-}
+//             unsafe {
+//                 // SAFETY: We need to ensure that the iterator has an exact length and we have.
+//                 Xrc::from_iter_exact(self, low)
+//             }
+//         } else {
+//             // TrustedLen contract guarantees that `upper_bound == None` implies an iterator
+//             // length exceeding `usize::MAX`.
+//             // The default implementation would collect into a vec which would panic.
+//             // Thus we panic here immediately without invoking `Vec` code.
+//             panic!("capacity overflow");
+//         }
+//     }
+// }
 
-impl<T: ?Sized> borrow::Borrow<T> for Xrc<T> {
+impl<T: ?Sized, A: Allocator> borrow::Borrow<T> for Xrc<T, A> {
     fn borrow(&self) -> &T {
         &**self
     }
 }
 
-impl<T: ?Sized> AsRef<T> for Xrc<T> {
+impl<T: ?Sized, A: Allocator> AsRef<T> for Xrc<T, A> {
     fn as_ref(&self) -> &T {
         &**self
     }
 }
 
-impl<T: ?Sized> Unpin for Xrc<T> {}
-
-pub(crate) trait WriteCloneIntoRaw: Sized {
-    unsafe fn write_clone_into_raw(&self, target: *mut Self);
-}
-
-impl<T: Clone> WriteCloneIntoRaw for T {
-    #[inline]
-    default unsafe fn write_clone_into_raw(&self, target: *mut Self) {
-        // Having allocated *first* may allow the optimizer to create
-        // the cloned value in-place, skipping the local and move.
-        unsafe { target.write(self.clone()) };
-    }
-}
-
-impl<T: Copy> WriteCloneIntoRaw for T {
-    #[inline]
-    unsafe fn write_clone_into_raw(&self, target: *mut Self) {
-        // We can always copy in-place, without ever involving a local value.
-        unsafe { target.copy_from_nonoverlapping(self, 1) };
-    }
-}
+impl<T: ?Sized, A: Allocator> Unpin for Xrc<T, A> {}
 
 /// Get the offset within an `XrcInner` for the payload behind a pointer.
 ///
@@ -2865,17 +3417,6 @@ unsafe fn data_offset<T: ?Sized>(ptr: *const T) -> usize {
     // satisfy the requirements of align_of_val_raw; this is an implementation
     // detail of the language that must not be relied upon outside of std.
     unsafe { data_offset_align(align_of_val_raw(ptr)) }
-}
-pub(crate) fn is_dangling<T: ?Sized>(ptr: *mut T) -> bool {
-    (ptr as *mut ()).addr() == usize::MAX
-}
-pub(crate) unsafe fn box_free<T: ?Sized, A: Allocator>(ptr: Unique<T>, alloc: A) {
-    unsafe {
-        let size = size_of_val(ptr.as_ref());
-        let align = min_align_of_val(ptr.as_ref());
-        let layout = Layout::from_size_align_unchecked(size, align);
-        alloc.deallocate(From::from(ptr.cast()), layout)
-    }
 }
 
 #[inline]
@@ -2899,7 +3440,12 @@ impl<T: core::error::Error + ?Sized> core::error::Error for Xrc<T> {
         core::error::Error::source(&**self)
     }
 
-    fn provide<'a>(&'a self, req: &mut core::any::Demand<'a>) {
+    fn provide<'a>(&'a self, req: &mut core::error::Request<'a>) {
         core::error::Error::provide(&**self, req);
     }
 }
+
+pub(crate) fn is_dangling<T: ?Sized>(ptr: *const T) -> bool {
+    (ptr.cast::<()>()).addr() == usize::MAX
+}
+

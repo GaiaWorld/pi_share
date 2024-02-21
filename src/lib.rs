@@ -25,19 +25,14 @@
 #![feature(const_trait_impl)]
 #![feature(allocator_api)]
 #![feature(receiver_trait)]
-#![feature(core_intrinsics)]
 #![feature(strict_provenance)]
 #![feature(error_in_core)]
 #![feature(error_generic_member_access)]
-#![feature(provide_any)]
 #![feature(layout_for_ptr)]
 #![feature(trusted_len)]
 #![feature(slice_ptr_get)]
-#![feature(ptr_internals)]
 #![feature(set_ptr_value)]
-#![feature(pointer_byte_offsets)]
 #![feature(alloc_layout_extra)]
-#![feature(specialization)]
 
 pub mod arc_cell;
 pub mod atomic;
