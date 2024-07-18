@@ -1,5 +1,6 @@
 use std::{cell::SyncUnsafeCell, mem, sync::atomic::Ordering};
 
+pub static mut COMPONENT_INDEX: usize = usize::MAX;
 
 #[derive(Debug)]
 pub struct AtomicCell<T: ?Sized>(SyncUnsafeCell<T>);
@@ -34,6 +35,7 @@ impl<T> AtomicCell<*mut T> {
         _success: Ordering,
         _failure: Ordering,
     ) -> Result<*mut T, *mut T> {
+
         let r = unsafe { *&*self.0.get() };
         if r == current {
             *{ unsafe { &mut *self.0.get() } } = new;
@@ -311,6 +313,128 @@ impl AtomicCell<u8> {
     }
 }
 
+impl AtomicCell<u32> {
+    #[inline(always)]
+    pub fn compare_exchange(
+        &self,
+        current: u32,
+        new: u32,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u32, u32> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn compare_exchange_weak(
+        &self,
+        current: u32,
+        new: u32,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u32, u32> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r + val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_and(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r & val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_max(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        if r < val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_min(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        if r > val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_nand(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = !(r & val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_or(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r | val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_sub(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r - val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_update<F>(
+        &self,
+        _set_order: Ordering,
+        _fetch_order: Ordering,
+        mut f: F,
+    ) -> Result<u32, u32>
+    where
+        F: FnMut(u32) -> Option<u32>,
+    {
+        let r = unsafe { *&*self.0.get() };
+        if let Some(val) = f(r) {
+            *{ unsafe { &mut *self.0.get() } } = val;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_xor(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r ^ val;
+        r
+    }
+    #[inline(always)]
+    pub fn into_inner(self) -> u32 {
+        self.0.into_inner()
+    }
+    #[inline(always)]
+    pub fn load(&self, _order: Ordering) -> u32 {
+        unsafe { *&*self.0.get() }
+    }
+    #[inline(always)]
+    pub fn store(&self, val: u32, _order: Ordering) {
+        *{ unsafe { &mut *self.0.get() } } = val;
+    }
+    #[inline(always)]
+    pub fn swap(&self, mut val: u32, _order: Ordering) -> u32 {
+        mem::swap(unsafe { &mut *self.0.get() }, &mut val);
+        val
+    }
+}
+
 pub trait SharePtr<T> {
     fn compare_exchange(
         &self,
@@ -350,7 +474,9 @@ impl AtomicCell<usize> {
         _success: Ordering,
         _failure: Ordering,
     ) -> Result<usize, usize> {
+
         let r = unsafe { *&*self.0.get() };
+
         if r == current {
             *{ unsafe { &mut *self.0.get() } } = new;
             Ok(r)

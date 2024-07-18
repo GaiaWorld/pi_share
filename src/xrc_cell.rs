@@ -1,4 +1,4 @@
-use crate::{cell::{TrustCell, RefMut, InvalidBorrow}, xrc::Xrc};
+use crate::{cell::{TrustCell, RefMut, InvalidBorrow}, xrc2::Xrc};
 use std::{
     cmp::Ordering,
     fmt,

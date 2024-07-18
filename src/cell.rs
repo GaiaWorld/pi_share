@@ -16,11 +16,9 @@
 use std::error::Error;
 
 use std::{
-    cell::SyncUnsafeCell,
-    fmt::{Display, Error as FormatError, Formatter},
-    ops::{Deref, DerefMut},
-    sync::atomic::Ordering,
+    cell::SyncUnsafeCell, fmt::{Display, Error as FormatError, Formatter}, ops::{Deref, DerefMut}, sync::atomic::Ordering
 };
+
 use crate::ShareUsize;
 
 
@@ -265,7 +263,7 @@ impl<'a, T: ?Sized> DerefMut for RefMut<'a, T> {
 
 impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
     fn drop(&mut self) {
-        self.flag.store(0, Ordering::Release)
+        self.flag.store(0, Ordering::Release);
     }
 }
 
@@ -423,6 +421,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    // use crate::atomic::AtomicCell as AtomicUsize;
+
     use std::sync::atomic::AtomicUsize;
 
     use super::*;

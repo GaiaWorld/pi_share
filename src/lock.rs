@@ -10,7 +10,7 @@ unsafe impl<T> Send for LockCell<T> where T: Send {}
 
 impl<T> LockCell<T> {
     #[inline]
-    pub const fn new(value: T) -> Self {
+    pub fn new(value: T) -> Self {
         LockCell(TrustCell::new(value))
     }
     pub fn into_inner(self) -> T {
@@ -44,8 +44,8 @@ impl<T> LockCell<T> {
             _ => None
         }
     }
-    pub fn lock(&self) -> RefMut<'_, T> {
-        self.0.borrow_mut()
+    pub fn lock(&self) -> Option<RefMut<'_, T>> {
+        Some(self.0.borrow_mut())
     }
     pub fn try_lock(&self) -> Option<RefMut<'_, T>> {
         match self.0.try_borrow_mut() {

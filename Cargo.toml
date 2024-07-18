@@ -10,7 +10,9 @@ keywords = ["pi", "share", "pi_share"]
 
 [features]
 rc = []
+no_atomic = []
 serial = []
 
 [dependencies]
+log = "0.4"
 #parking_lot = "0.12"
