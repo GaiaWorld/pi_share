@@ -1985,7 +1985,7 @@ impl<T: ?Sized, A: Allocator> Deref for Xrc<T, A> {
     }
 }
 
-impl<T: ?Sized> Receiver for Xrc<T> {}
+// impl<T: ?Sized> Receiver for Xrc<T> {}
 
 impl<T: Clone, A: Allocator + Clone> Xrc<T, A> {
     /// Makes a mutable reference into the given `Xrc`.
@@ -2428,7 +2428,7 @@ impl<T> Weak<T> {
     #[must_use]
     pub const fn new() -> Weak<T> {
         Weak {
-            ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<XrcInner<T>>(usize::MAX)) },
+            ptr: unsafe { NonNull::new_unchecked(usize::MAX as *mut XrcInner<T>) },
             alloc: Global,
         }
     }
@@ -2455,7 +2455,7 @@ impl<T, A: Allocator> Weak<T, A> {
     #[inline]
     pub fn new_in(alloc: A) -> Weak<T, A> {
         Weak {
-            ptr: unsafe { NonNull::new_unchecked(ptr::invalid_mut::<XrcInner<T>>(usize::MAX)) },
+            ptr: unsafe { NonNull::new_unchecked(usize::MAX as *mut XrcInner<T>) },
             alloc,
         }
     }
