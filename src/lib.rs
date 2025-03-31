@@ -64,7 +64,7 @@ pub trait ThreadSync: Sync + Send {}
 impl<T: Sync + Send> ThreadSync for T {}
 
 #[cfg(feature = "rc")]
-pub type Share<T> = Xrc<T>;
+pub type Share<T> = crate::xrc::Xrc<T>;
 #[cfg(feature = "rc")]
 pub type ShareWeak<T> = xrc::Weak<T>;
 #[cfg(feature = "rc")]

@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn ref_with_non_sized() {
         let r: Ref<'_, [i32]> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &[2, 3, 4, 5][..],
         };
 
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn ref_with_non_sized_clone() {
         let r: Ref<'_, [i32]> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &[2, 3, 4, 5][..],
         };
         let rr = r.clone();
@@ -560,7 +560,7 @@ mod tests {
     #[test]
     fn ref_with_trait_obj() {
         let ra: Ref<'_, dyn std::any::Any> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &2i32,
         };
 
@@ -570,7 +570,7 @@ mod tests {
     #[test]
     fn ref_mut_with_non_sized() {
         let mut r: RefMut<'_, [i32]> = RefMut {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &mut [2, 3, 4, 5][..],
         };
 
@@ -580,7 +580,7 @@ mod tests {
     #[test]
     fn ref_mut_with_trait_obj() {
         let mut ra: RefMut<'_, dyn std::any::Any> = RefMut {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &mut 2i32,
         };
 
