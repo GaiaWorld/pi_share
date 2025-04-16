@@ -26,8 +26,8 @@ impl<T> LockCell<T> {
     pub fn get_mut(&mut self) -> RefMut<'_, T> {
         self.0.borrow_mut()
     }
-    pub fn read(&self) -> Ref<'_, T> {
-        self.0.borrow()
+    pub fn read(&self) -> Result<Ref<'_, T>, ()> {
+        Ok(self.0.borrow())
     }
     pub fn try_read(&self) -> Option<Ref<'_, T>> {
         match self.0.try_borrow() {
@@ -35,8 +35,8 @@ impl<T> LockCell<T> {
             _ => None
         }
     }
-    pub fn write(&self) -> RefMut<'_, T> {
-        self.0.borrow_mut()
+    pub fn write(&self) -> Result<RefMut<'_, T>, ()> {
+        Ok(self.0.borrow_mut())
     }
     pub fn try_write(&self) -> Option<RefMut<'_, T>> {
         match self.0.try_borrow_mut() {
@@ -44,8 +44,8 @@ impl<T> LockCell<T> {
             _ => None
         }
     }
-    pub fn lock(&self) -> RefMut<'_, T> {
-        self.0.borrow_mut()
+    pub fn lock(&self) -> Result<RefMut<'_, T>, ()> {
+        Ok(self.0.borrow_mut())
     }
     pub fn try_lock(&self) -> Option<RefMut<'_, T>> {
         match self.0.try_borrow_mut() {

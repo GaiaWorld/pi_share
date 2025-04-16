@@ -13,14 +13,14 @@ use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::hint;
-use std::ops::Deref;
+use std::marker::Unsize;
+use std::ops::{CoerceUnsized, Deref, DispatchFromDyn};
 use std::process::abort;
 #[cfg(not(no_global_oom_handling))]
 use core::marker::PhantomData;
 #[cfg(not(no_global_oom_handling))]
 use core::mem::size_of_val;
 use core::mem::{self, align_of_val_raw};
-use core::ops::Receiver;
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
@@ -240,10 +240,14 @@ pub struct Xrc<
     alloc: A,
 }
 
+
 unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Send> Send for Xrc<T, A> {}
 unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Sync> Sync for Xrc<T, A> {}
 
 impl<T: RefUnwindSafe + ?Sized, A: Allocator + UnwindSafe> UnwindSafe for Xrc<T, A> {}
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Xrc<U>> for Xrc<T> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized, A: Allocator> CoerceUnsized<Xrc<U, A>> for Xrc<T, A> {}
 
 
 impl<T: ?Sized> Xrc<T> {
@@ -304,6 +308,9 @@ pub struct Weak<
 
 unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Send> Send for Weak<T, A> {}
 unsafe impl<T: ?Sized + Sync + Send, A: Allocator + Sync> Sync for Weak<T, A> {}
+impl<T: ?Sized + Unsize<U>, U: ?Sized> DispatchFromDyn<Weak<U>> for Weak<T> {}
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized, A: Allocator> CoerceUnsized<Weak<U, A>> for Weak<T, A> {}
 
 impl<T: ?Sized> fmt::Debug for Weak<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

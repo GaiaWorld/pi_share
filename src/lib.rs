@@ -1,3 +1,6 @@
+#![feature(dispatch_from_dyn)]
+#![feature(coerce_unsized)]
+#![feature(unsize)]
 //! 默认 不带 任何 feature
 //!
 //! ## 1. 几个类型封装

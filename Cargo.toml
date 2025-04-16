@@ -1,6 +1,6 @@
 [package]
 name = "pi_share"
-version = "0.5.1"
+version = "0.5.2"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
 description = "rc, arc, lock, atomic"
@@ -13,4 +13,5 @@ rc = []
 serial = []
 
 [dependencies]
+pi_null = "0.1.0"
 #parking_lot = "0.12"
