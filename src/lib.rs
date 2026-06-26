@@ -37,6 +37,7 @@
 #![feature(slice_ptr_get)]
 #![feature(set_ptr_value)]
 #![feature(alloc_layout_extra)]
+#![feature(ptr_alignment_type)]
 
 pub mod arc_cell;
 pub mod atomic;

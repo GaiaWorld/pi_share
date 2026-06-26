@@ -20,7 +20,7 @@ use std::process::abort;
 use core::marker::PhantomData;
 #[cfg(not(no_global_oom_handling))]
 use core::mem::size_of_val;
-use core::mem::{self, align_of_val_raw};
+use core::mem::{self, align_of_val_raw, Alignment};
 use core::panic::{RefUnwindSafe, UnwindSafe};
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
@@ -3429,6 +3429,7 @@ unsafe fn data_offset<T: ?Sized>(ptr: *const T) -> usize {
 #[inline]
 fn data_offset_align(align: usize) -> usize {
     let layout = Layout::new::<XrcInner<()>>();
+    let Some(align) = Alignment::new(align) else { return usize::MAX };
     layout.size() + layout.padding_needed_for(align)
 }
 
