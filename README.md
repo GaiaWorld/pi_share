@@ -17,7 +17,7 @@
 
 默认不启用任何 feature。使用 `--features rc` 选择单线程实现，并自动启用 `serial`；仅启用 `serial` 只放宽 `ThreadSend` / `ThreadSync` 的标记约束，不切换上述类型。一个依赖图中的 Cargo feature 会合并，应用应为整个构建一致地选择模式。
 
-`ShareCell` / `Cell` 始终是 `TrustCell`。单线程的 `LockCell` 遇到冲突借用会立即 panic，`try_*` 方法返回 `None`；它不会像多线程锁一样等待，也不会中毒。单线程 `AtomicCell` 接受 `Ordering` 参数但不提供跨线程内存排序；目前仅指针、布尔值、`u8` 和 `usize` 有对应操作方法，`u32` / `u64` 仅提供通用构造和独占访问等方法。尤其 `SharePtr<T>` 在默认模式存储 `*mut T`，而在 `rc` 模式直接存储 `T`；切换模式时调用方须检查构造和指针操作。不要假设不同模式下的全部方法或返回值类型完全相同。
+`ShareCell` / `Cell` 始终是 `TrustCell`。单线程的 `LockCell` 遇到冲突借用会立即 panic，`try_*` 方法返回 `None`；`read` / `write` / `lock` 与多线程锁一样返回 `Result`，但不会像多线程锁一样等待，也不会中毒。单线程 `AtomicCell` 接受 `Ordering` 参数但不提供跨线程内存排序；指针、布尔值、`u8`、`usize`、`u32` 和 `u64` 有对应操作方法。尤其 `SharePtr<T>` 在默认模式存储 `*mut T`，而在 `rc` 模式直接存储 `T`；切换模式时调用方须检查构造和指针操作。不要假设不同模式下的全部方法或返回值类型完全相同。
 
 ## 借用与迁移
 

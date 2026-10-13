@@ -13,4 +13,5 @@ rc = ["serial"]
 serial = []
 
 [dependencies]
+pi_null = "0.1.0"
 #parking_lot = "0.12"

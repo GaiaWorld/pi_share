@@ -1,9 +1,20 @@
+use pi_null::Null;
 use std::{cell::UnsafeCell, mem, sync::atomic::Ordering};
 
 /// 单线程原子接口的非原子实现。排序参数不产生跨线程同步；不得跨线程共享。
-/// 目前仅为指针、布尔值、`u8` 和 `usize` 实现具体操作。
+/// 为指针、布尔值、`u8`、`usize`、`u32` 和 `u64` 实现具体操作。
 #[derive(Debug)]
 pub struct AtomicCell<T: ?Sized>(UnsafeCell<T>);
+
+impl<T: Null> Null for AtomicCell<T> {
+    fn null() -> Self {
+        AtomicCell::new(Null::null())
+    }
+
+    fn is_null(&self) -> bool {
+        unsafe { (*self.0.get()).is_null() }
+    }
+}
 
 impl<T> AtomicCell<T> {
     pub const fn new(value: T) -> Self {
@@ -479,5 +490,258 @@ mod tests {
         assert_eq!(word.load(Ordering::Relaxed), 0);
         assert_eq!(word.fetch_sub(1, Ordering::Relaxed), 0);
         assert_eq!(word.load(Ordering::Relaxed), usize::MAX);
+
+        let wide32 = AtomicCell::new(u32::MAX);
+        assert_eq!(wide32.fetch_add(1, Ordering::Relaxed), u32::MAX);
+        assert_eq!(wide32.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(wide32.load(Ordering::Relaxed), u32::MAX);
+
+        let wide64 = AtomicCell::new(u64::MAX);
+        assert_eq!(wide64.fetch_add(1, Ordering::Relaxed), u64::MAX);
+        assert_eq!(wide64.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(wide64.load(Ordering::Relaxed), u64::MAX);
+    }
+}
+impl AtomicCell<u32> {
+    #[inline(always)]
+    pub fn compare_exchange(
+        &self,
+        current: u32,
+        new: u32,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u32, u32> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn compare_exchange_weak(
+        &self,
+        current: u32,
+        new: u32,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u32, u32> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_add(val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_and(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r & val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_max(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        if r < val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_min(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        if r > val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_nand(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = !(r & val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_or(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r | val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_sub(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_sub(val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_update<F>(
+        &self,
+        _set_order: Ordering,
+        _fetch_order: Ordering,
+        mut f: F,
+    ) -> Result<u32, u32>
+    where
+        F: FnMut(u32) -> Option<u32>,
+    {
+        let r = unsafe { *&*self.0.get() };
+        if let Some(val) = f(r) {
+            *{ unsafe { &mut *self.0.get() } } = val;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_xor(&self, val: u32, _order: Ordering) -> u32 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r ^ val;
+        r
+    }
+    #[inline(always)]
+    pub fn into_inner(self) -> u32 {
+        self.0.into_inner()
+    }
+    #[inline(always)]
+    pub fn load(&self, _order: Ordering) -> u32 {
+        unsafe { *&*self.0.get() }
+    }
+    #[inline(always)]
+    pub fn store(&self, val: u32, _order: Ordering) {
+        *{ unsafe { &mut *self.0.get() } } = val;
+    }
+    #[inline(always)]
+    pub fn swap(&self, mut val: u32, _order: Ordering) -> u32 {
+        mem::swap(unsafe { &mut *self.0.get() }, &mut val);
+        val
+    }
+}
+
+impl AtomicCell<u64> {
+    #[inline(always)]
+    pub fn compare_exchange(
+        &self,
+        current: u64,
+        new: u64,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u64, u64> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn compare_exchange_weak(
+        &self,
+        current: u64,
+        new: u64,
+        _success: Ordering,
+        _failure: Ordering,
+    ) -> Result<u64, u64> {
+        let r = unsafe { *&*self.0.get() };
+        if r == current {
+            *{ unsafe { &mut *self.0.get() } } = new;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_add(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_add(val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_and(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r & val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_max(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        if r < val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_min(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        if r > val {
+            *{ unsafe { &mut *self.0.get() } } = val;
+        }
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_nand(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = !(r & val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_or(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r | val;
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_sub(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_sub(val);
+        r
+    }
+    #[inline(always)]
+    pub fn fetch_update<F>(
+        &self,
+        _set_order: Ordering,
+        _fetch_order: Ordering,
+        mut f: F,
+    ) -> Result<u64, u64>
+    where
+        F: FnMut(u64) -> Option<u64>,
+    {
+        let r = unsafe { *&*self.0.get() };
+        if let Some(val) = f(r) {
+            *{ unsafe { &mut *self.0.get() } } = val;
+            Ok(r)
+        } else {
+            Err(r)
+        }
+    }
+    #[inline(always)]
+    pub fn fetch_xor(&self, val: u64, _order: Ordering) -> u64 {
+        let r = unsafe { *&*self.0.get() };
+        *{ unsafe { &mut *self.0.get() } } = r ^ val;
+        r
+    }
+    #[inline(always)]
+    pub fn into_inner(self) -> u64 {
+        self.0.into_inner()
+    }
+    #[inline(always)]
+    pub fn load(&self, _order: Ordering) -> u64 {
+        unsafe { *&*self.0.get() }
+    }
+    #[inline(always)]
+    pub fn store(&self, val: u64, _order: Ordering) {
+        *{ unsafe { &mut *self.0.get() } } = val;
+    }
+    #[inline(always)]
+    pub fn swap(&self, mut val: u64, _order: Ordering) -> u64 {
+        mem::swap(unsafe { &mut *self.0.get() }, &mut val);
+        val
     }
 }
