@@ -24,3 +24,5 @@
 `ShareRefCell` 通过 `borrow()` / `borrow_mut()` 返回带生命周期的守卫；也可使用 `try_borrow()` / `try_borrow_mut()`。守卫存活期间才允许访问内部值，不再支持直接对容器进行 `Deref` / `DerefMut`。
 
 `1.0.0` 移除了自维护的 `xrc` 模块：原先直接依赖 `pi_share::xrc` 的代码需改用标准库 `Rc` / `Weak`；依赖容器隐式解引用的代码需改为显式借用。更改前请分别在默认与 `rc` 模式下编译调用方。
+
+`2.0.0` 合入了单线程 `ShareU32` / `ShareU64` 的操作和 `AtomicCell<T>: pi_null::Null`（当 `T: Null`）；`rc` 模式下 `ShareMutex::lock`、`ShareRwLock::read` / `write` 现在返回 `Result`，以便与默认模式的调用形式对齐。该版本还将 `pi_null` 依赖升级到 `0.2`。调用方升级前需检查锁的返回值并重新编译两种构建模式。
