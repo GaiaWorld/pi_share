@@ -1,14 +1,13 @@
-use std::{cell::SyncUnsafeCell, mem, sync::atomic::Ordering};
+use std::{cell::UnsafeCell, mem, sync::atomic::Ordering};
 
-
+/// 单线程原子接口的非原子实现。排序参数不产生跨线程同步；不得跨线程共享。
+/// 目前仅为指针、布尔值、`u8` 和 `usize` 实现具体操作。
 #[derive(Debug)]
-pub struct AtomicCell<T: ?Sized>(SyncUnsafeCell<T>);
-unsafe impl<T> Sync for AtomicCell<T> where T: Sync {}
-unsafe impl<T> Send for AtomicCell<T> where T: Send {}
+pub struct AtomicCell<T: ?Sized>(UnsafeCell<T>);
 
 impl<T> AtomicCell<T> {
     pub const fn new(value: T) -> Self {
-        AtomicCell(SyncUnsafeCell::new(value))
+        AtomicCell(UnsafeCell::new(value))
     }
     pub fn get_mut(&mut self) -> &mut T {
         self.0.get_mut()
@@ -225,7 +224,7 @@ impl AtomicCell<u8> {
     #[inline(always)]
     pub fn fetch_add(&self, val: u8, _order: Ordering) -> u8 {
         let r = unsafe { *&*self.0.get() };
-        *{ unsafe { &mut *self.0.get() } } = r + val;
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_add(val);
         r
     }
     #[inline(always)]
@@ -265,7 +264,7 @@ impl AtomicCell<u8> {
     #[inline(always)]
     pub fn fetch_sub(&self, val: u8, _order: Ordering) -> u8 {
         let r = unsafe { *&*self.0.get() };
-        *{ unsafe { &mut *self.0.get() } } = r - val;
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_sub(val);
         r
     }
     #[inline(always)]
@@ -377,7 +376,7 @@ impl AtomicCell<usize> {
     #[inline(always)]
     pub fn fetch_add(&self, val: usize, _order: Ordering) -> usize {
         let r = unsafe { *&*self.0.get() };
-        *{ unsafe { &mut *self.0.get() } } = r + val;
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_add(val);
         r
     }
     #[inline(always)]
@@ -417,7 +416,7 @@ impl AtomicCell<usize> {
     #[inline(always)]
     pub fn fetch_sub(&self, val: usize, _order: Ordering) -> usize {
         let r = unsafe { *&*self.0.get() };
-        *{ unsafe { &mut *self.0.get() } } = r - val;
+        *{ unsafe { &mut *self.0.get() } } = r.wrapping_sub(val);
         r
     }
     #[inline(always)]
@@ -460,5 +459,25 @@ impl AtomicCell<usize> {
     pub fn swap(&self, mut val: usize, _order: Ordering) -> usize {
         mem::swap(unsafe { &mut *self.0.get() }, &mut val);
         val
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integer_fetch_operations_wrap() {
+        let byte = AtomicCell::new(u8::MAX);
+        assert_eq!(byte.fetch_add(1, Ordering::Relaxed), u8::MAX);
+        assert_eq!(byte.load(Ordering::Relaxed), 0);
+        assert_eq!(byte.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(byte.load(Ordering::Relaxed), u8::MAX);
+
+        let word = AtomicCell::new(usize::MAX);
+        assert_eq!(word.fetch_add(1, Ordering::Relaxed), usize::MAX);
+        assert_eq!(word.load(Ordering::Relaxed), 0);
+        assert_eq!(word.fetch_sub(1, Ordering::Relaxed), 0);
+        assert_eq!(word.load(Ordering::Relaxed), usize::MAX);
     }
 }

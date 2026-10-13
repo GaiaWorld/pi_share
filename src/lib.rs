@@ -1,53 +1,26 @@
-//! 默认 不带 任何 feature
+//! 在多线程构建中使用标准库共享指针、锁和原子类型；在确认单线程的构建中
+//! 启用 `rc`，以 `Rc`、动态借用检查及非原子操作减少同步开销。
+//! 不能仅凭目标是 WebAssembly 就启用 `rc`：有共享内存或多个工作线程时
+//! 仍须使用默认模式。各模式的借用与锁定行为并不完全一致。
 //!
-//! ## 1. 几个类型封装
+//! `serial` 只放宽 `ThreadSend` / `ThreadSync` 标记约束；
+//! `rc` 会自动启用 `serial`。具体映射、限制和迁移说明见 README。
 //!
-//! + `Share` = `Xrc` | `Arc`
-//! + `ShareWeak` = `xrc::Weak` | `sync::Weak`
-//! + `ShareMutex` = `LockCell(RefCell<T>)` | Mutex
-//! + `ShareRwLock` = `LockCell(RefCell<T>)` | `RwLock`
-//! + `ShareCell` = `cell::TrustCell`
-//! + `SharePtr` = `SyncUnsafeCell<T>` | `AtomicPtr<T>`
-//! + `ShareRefCell` = `XrcCell<T>` | `ArcCell<T>`
-//! + `ShareBool` = `SyncUnsafeCell<bool>` | `AtomicBool`
-//! + `ShareU8` = `SyncUnsafeCell<u8>` | `AtomicU8`
-//! + `ShareU32` = `SyncUnsafeCell<u32>` | `AtomicU32`
-//! + `ShareUsize` = `SyncUnsafeCell<usize>` | `AtomicUsize`
-//!
-//! ## 2. 提供 Send, Sync 的 封装
-//!
-//! 目的：wasm 不支持 Send + Sync
-//!
-//! + ThreadSend = Send
-//! + ThreadSync = Sync + Send
-//!
-#![feature(sync_unsafe_cell)]
-#![feature(const_trait_impl)]
-#![feature(allocator_api)]
-#![feature(receiver_trait)]
-#![feature(strict_provenance)]
-#![feature(error_in_core)]
-#![feature(error_generic_member_access)]
-#![feature(layout_for_ptr)]
-#![feature(trusted_len)]
-#![feature(slice_ptr_get)]
-#![feature(set_ptr_value)]
-#![feature(alloc_layout_extra)]
-
 pub mod arc_cell;
 pub mod atomic;
 pub mod cell;
 pub mod lock;
-pub mod xrc;
 pub mod xrc_cell;
 
 pub type ShareCell<T> = cell::TrustCell<T>;
 pub type Cell<T> = cell::TrustCell<T>;
 
+/// 线程传递约束：默认模式要求 `Send`，`serial` 模式不施加约束。
 #[cfg(feature = "serial")]
 pub trait ThreadSend {}
 #[cfg(feature = "serial")]
 impl<T> ThreadSend for T {}
+/// 线程共享约束：默认模式要求 `Send + Sync`，`serial` 模式不施加约束。
 #[cfg(feature = "serial")]
 pub trait ThreadSync {}
 #[cfg(feature = "serial")]
@@ -63,9 +36,9 @@ pub trait ThreadSync: Sync + Send {}
 impl<T: Sync + Send> ThreadSync for T {}
 
 #[cfg(feature = "rc")]
-pub type Share<T> = Xrc<T>;
+pub type Share<T> = std::rc::Rc<T>;
 #[cfg(feature = "rc")]
-pub type ShareWeak<T> = xrc::Weak<T>;
+pub type ShareWeak<T> = std::rc::Weak<T>;
 #[cfg(feature = "rc")]
 pub type ShareMutex<T> = crate::lock::LockCell<T>;
 #[cfg(feature = "rc")]
@@ -86,7 +59,7 @@ pub type ShareU64 = crate::atomic::AtomicCell<u64>;
 pub use xrc_cell::XrcCell as ShareRefCell;
 #[cfg(feature = "rc")]
 #[inline(always)]
-pub fn fence(or: std::sync::atomic::Ordering) {}
+pub fn fence(_or: std::sync::atomic::Ordering) {}
 
 #[cfg(not(feature = "rc"))]
 use std::sync::{
@@ -120,4 +93,14 @@ pub use arc_cell::ArcCell as ShareRefCell;
 #[inline(always)]
 pub fn fence(or: std::sync::atomic::Ordering) {
     std::sync::atomic::fence(or)
+}
+
+#[cfg(test)]
+mod thread_safety_tests {
+    #[cfg(not(feature = "rc"))]
+    #[test]
+    fn trust_cell_can_be_shared_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<crate::ShareCell<usize>>();
+    }
 }

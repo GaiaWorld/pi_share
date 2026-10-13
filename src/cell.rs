@@ -11,18 +11,16 @@
 //! Helper module for some internals, most users don't need to interact with it.
 //!
 //! From https://github.com/aclysma/rafx/blob/master/rafx-base/src/trust_cell.rs
-//! 
-#[cfg(feature = "std")]
+//!
 use std::error::Error;
 
+use crate::ShareUsize;
 use std::{
-    cell::SyncUnsafeCell,
+    cell::UnsafeCell,
     fmt::{Display, Error as FormatError, Formatter},
     ops::{Deref, DerefMut},
     sync::atomic::Ordering,
 };
-use crate::ShareUsize;
-
 
 macro_rules! borrow_panic {
     ($s:expr) => {{
@@ -34,7 +32,7 @@ macro_rules! borrow_panic {
     }};
 }
 
-/// Marker struct for an invalid borrow error
+/// 借用冲突或共享借用计数达到上限时返回的错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct InvalidBorrow;
 
@@ -44,7 +42,6 @@ impl Display for InvalidBorrow {
     }
 }
 
-#[cfg(feature = "std")]
 impl Error for InvalidBorrow {
     fn description(&self) -> &str {
         "This error is returned when you try to borrow immutably when it's already \
@@ -52,9 +49,8 @@ impl Error for InvalidBorrow {
     }
 }
 
-/// An immutable reference to data in a `TrustCell`.
-///
-/// Access the value via `std::ops::Deref` (e.g. `*val`)
+/// `TrustCell` 的只读借用守卫；释放时减少借用计数。
+/// 通过 `Deref` 访问内部值，克隆守卫会增加共享借用计数。
 #[derive(Debug)]
 pub struct Ref<'a, T: 'a + ?Sized> {
     flag: &'a ShareUsize,
@@ -117,10 +113,7 @@ impl<'a, T: ?Sized> Ref<'a, T> {
     /// let b2: Ref<'_, u32> = Ref::map(b1, |t| &t.0);
     /// assert_eq!(*b2, 5);
     /// ```
-    pub fn map<U, F>(
-        self,
-        f: F,
-    ) -> Ref<'a, U>
+    pub fn map<U, F>(self, f: F) -> Ref<'a, U>
     where
         F: FnOnce(&T) -> &U,
         U: ?Sized,
@@ -160,7 +153,17 @@ impl<'a, T: ?Sized> Drop for Ref<'a, T> {
 
 impl<'a, T: ?Sized> Clone for Ref<'a, T> {
     fn clone(&self) -> Self {
-        self.flag.fetch_add(1, Ordering::Release);
+        loop {
+            let count = self.flag.load(Ordering::Acquire);
+            assert!(count < usize::MAX - 1, "too many shared borrows");
+            if self
+                .flag
+                .compare_exchange_weak(count, count + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+        }
         Ref {
             flag: self.flag,
             value: self.value,
@@ -168,9 +171,8 @@ impl<'a, T: ?Sized> Clone for Ref<'a, T> {
     }
 }
 
-/// A mutable reference to data in a `TrustCell`.
-///
-/// Access the value via `std::ops::DerefMut` (e.g. `*val`)
+/// `TrustCell` 的独占借用守卫；释放时清除独占标记。
+/// 通过 `DerefMut` 修改内部值。
 #[derive(Debug)]
 pub struct RefMut<'a, T: 'a + ?Sized> {
     flag: &'a ShareUsize,
@@ -222,10 +224,7 @@ impl<'a, T: ?Sized> RefMut<'a, T> {
     /// let b2: RefMut<'_, u32> = RefMut::map(b1, |t| &mut t.0);
     /// assert_eq!(*b2, 5);
     /// ```
-    pub fn map<U, F>(
-        self,
-        f: F,
-    ) -> RefMut<'a, U>
+    pub fn map<U, F>(self, f: F) -> RefMut<'a, U>
     where
         F: FnOnce(&mut T) -> &mut U,
         U: ?Sized,
@@ -269,21 +268,23 @@ impl<'a, T: ?Sized> Drop for RefMut<'a, T> {
     }
 }
 
-/// A custom cell container that is a `RefCell` with thread-safety.
+/// 提供运行时共享/独占借用检查的容器。
+/// 默认模式使用原子借用计数，只有 `T: Send + Sync` 时才能跨线程共享；
+/// `rc` 模式的借用计数非原子，因此不能跨线程共享。
 #[derive(Debug)]
 pub struct TrustCell<T: ?Sized> {
     flag: ShareUsize,
-    inner: SyncUnsafeCell<T>,
+    inner: UnsafeCell<T>,
 }
-unsafe impl<T: ?Sized> Sync for TrustCell<T> where T: Sync {}
-unsafe impl<T: ?Sized> Send for TrustCell<T> where T: Send {}
+#[cfg(not(feature = "rc"))]
+unsafe impl<T: ?Sized + Send + Sync> Sync for TrustCell<T> {}
 
 impl<T> TrustCell<T> {
     /// Create a new cell, similar to `RefCell::new`
     pub const fn new(val: T) -> Self {
         TrustCell {
             flag: ShareUsize::new(0),
-            inner: SyncUnsafeCell::new(val),
+            inner: UnsafeCell::new(val),
         }
     }
     /// Consumes this cell and returns ownership of `T`.
@@ -291,7 +292,6 @@ impl<T> TrustCell<T> {
         self.inner.into_inner()
     }
 }
-
 
 impl<T: ?Sized> TrustCell<T> {
     /// Get an immutable reference to the inner data.
@@ -302,7 +302,7 @@ impl<T: ?Sized> TrustCell<T> {
     ///
     /// This function will panic if there is a mutable reference to the data
     /// already in use.
-    pub fn borrow(&self) -> Ref<T> {
+    pub fn borrow(&self) -> Ref<'_, T> {
         self.check_flag_read()
             .unwrap_or_else(|_| borrow_panic!(" mutably"));
 
@@ -317,7 +317,7 @@ impl<T: ?Sized> TrustCell<T> {
     /// Absence of write accesses is checked at run-time. If access is not
     /// possible, an error is returned.
     #[allow(dead_code)]
-    pub fn try_borrow(&self) -> Result<Ref<T>, InvalidBorrow> {
+    pub fn try_borrow(&self) -> Result<Ref<'_, T>, InvalidBorrow> {
         self.check_flag_read()?;
 
         Ok(Ref {
@@ -334,7 +334,7 @@ impl<T: ?Sized> TrustCell<T> {
     ///
     /// This function will panic if there are any references to the data already
     /// in use.
-    pub fn borrow_mut(&self) -> RefMut<T> {
+    pub fn borrow_mut(&self) -> RefMut<'_, T> {
         self.check_flag_write()
             .unwrap_or_else(|_| borrow_panic!(""));
 
@@ -349,7 +349,7 @@ impl<T: ?Sized> TrustCell<T> {
     /// Exclusive access is checked at run-time. If access is not possible, an
     /// error is returned.#
     #[allow(dead_code)]
-    pub fn try_borrow_mut(&self) -> Result<RefMut<T>, InvalidBorrow> {
+    pub fn try_borrow_mut(&self) -> Result<RefMut<'_, T>, InvalidBorrow> {
         self.check_flag_write()?;
 
         Ok(RefMut {
@@ -375,7 +375,7 @@ impl<T: ?Sized> TrustCell<T> {
         loop {
             let val = self.flag.load(Ordering::Acquire);
 
-            if val == usize::MAX {
+            if val >= usize::MAX - 1 {
                 return Err(InvalidBorrow);
             }
 
@@ -423,8 +423,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
-
     use super::*;
 
     #[test]
@@ -533,9 +531,21 @@ mod tests {
     }
 
     #[test]
+    fn shared_borrow_count_never_becomes_write_marker() {
+        let cell = TrustCell::new(5);
+        cell.flag.store(usize::MAX - 2, Ordering::Relaxed);
+        let last = cell.try_borrow().unwrap();
+        assert!(cell.try_borrow().is_err());
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| last.clone())).is_err());
+        assert_eq!(cell.flag.load(Ordering::Relaxed), usize::MAX - 1);
+        drop(last);
+        assert_eq!(cell.flag.load(Ordering::Relaxed), usize::MAX - 2);
+    }
+
+    #[test]
     fn ref_with_non_sized() {
         let r: Ref<'_, [i32]> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &[2, 3, 4, 5][..],
         };
 
@@ -545,7 +555,7 @@ mod tests {
     #[test]
     fn ref_with_non_sized_clone() {
         let r: Ref<'_, [i32]> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &[2, 3, 4, 5][..],
         };
         let rr = r.clone();
@@ -560,7 +570,7 @@ mod tests {
     #[test]
     fn ref_with_trait_obj() {
         let ra: Ref<'_, dyn std::any::Any> = Ref {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &2i32,
         };
 
@@ -570,7 +580,7 @@ mod tests {
     #[test]
     fn ref_mut_with_non_sized() {
         let mut r: RefMut<'_, [i32]> = RefMut {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &mut [2, 3, 4, 5][..],
         };
 
@@ -580,7 +590,7 @@ mod tests {
     #[test]
     fn ref_mut_with_trait_obj() {
         let mut ra: RefMut<'_, dyn std::any::Any> = RefMut {
-            flag: &AtomicUsize::new(1),
+            flag: &ShareUsize::new(1),
             value: &mut 2i32,
         };
 
@@ -649,9 +659,9 @@ mod tests {
         let cell = TrustCell::new(Box::new(10));
 
         let r: RefMut<'_, Box<usize>> = cell.borrow_mut();
-        assert_eq!(cell.flag.load(Ordering::SeqCst), std::usize::MAX);
+        assert_eq!(cell.flag.load(Ordering::SeqCst), usize::MAX);
         let _nr: RefMut<'_, usize> = r.map(Box::as_mut);
-        assert_eq!(cell.flag.load(Ordering::SeqCst), std::usize::MAX);
+        assert_eq!(cell.flag.load(Ordering::SeqCst), usize::MAX);
     }
 
     #[test]
@@ -670,7 +680,7 @@ mod tests {
 
         let r: RefMut<'_, usize> = cell.borrow_mut().map(Box::as_mut);
 
-        assert_eq!(cell.flag.load(Ordering::SeqCst), std::usize::MAX);
+        assert_eq!(cell.flag.load(Ordering::SeqCst), usize::MAX);
         drop(r);
         assert_eq!(cell.flag.load(Ordering::SeqCst), 0);
     }

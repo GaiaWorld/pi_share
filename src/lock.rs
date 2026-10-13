@@ -1,12 +1,8 @@
+use crate::cell::{Ref, RefMut, TrustCell};
 
-
-use crate::cell::{TrustCell, Ref, RefMut};
-
-
+/// 单线程的动态借用锁；借用冲突立即报错或 panic，不等待也不中毒。
 #[derive(Debug)]
 pub struct LockCell<T>(TrustCell<T>);
-unsafe impl<T> Sync for LockCell<T> where T: Sync {}
-unsafe impl<T> Send for LockCell<T> where T: Send {}
 
 impl<T> LockCell<T> {
     #[inline]
@@ -22,7 +18,6 @@ impl<T> LockCell<T> {
 }
 
 impl<T> LockCell<T> {
-
     pub fn get_mut(&mut self) -> RefMut<'_, T> {
         self.0.borrow_mut()
     }
@@ -32,7 +27,7 @@ impl<T> LockCell<T> {
     pub fn try_read(&self) -> Option<Ref<'_, T>> {
         match self.0.try_borrow() {
             Ok(r) => Some(r),
-            _ => None
+            _ => None,
         }
     }
     pub fn write(&self) -> RefMut<'_, T> {
@@ -41,7 +36,7 @@ impl<T> LockCell<T> {
     pub fn try_write(&self) -> Option<RefMut<'_, T>> {
         match self.0.try_borrow_mut() {
             Ok(r) => Some(r),
-            _ => None
+            _ => None,
         }
     }
     pub fn lock(&self) -> RefMut<'_, T> {
@@ -50,7 +45,7 @@ impl<T> LockCell<T> {
     pub fn try_lock(&self) -> Option<RefMut<'_, T>> {
         match self.0.try_borrow_mut() {
             Ok(r) => Some(r),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -65,4 +60,3 @@ impl<T> From<T> for LockCell<T> {
         LockCell::new(t)
     }
 }
-

@@ -1,15 +1,15 @@
 [package]
 name = "pi_share"
-version = "0.4.15"
+version = "1.0.0"
 authors = ["suncy <530739162@qq.com>"]
 edition = "2021"
-description = "rc, arc, lock, atomic"
+description = "Single-thread and multi-thread sharing primitives behind common names"
 repository = "https://github.com/GaiaWorld/pi_share.git"
 license = "MIT OR Apache-2.0"
 keywords = ["pi", "share", "pi_share"]
 
 [features]
-rc = []
+rc = ["serial"]
 serial = []
 
 [dependencies]
